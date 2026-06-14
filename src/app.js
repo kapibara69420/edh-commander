@@ -460,9 +460,10 @@ function dbSave(el) {
 
 // ═══════════════════════════════════════════════════════════
 // NETWORKING — Supabase Realtime Broadcast (no server needed)
-// Each room = one Supabase channel. All players subscribe and
-// broadcast messages. State is managed locally; peers sync via
-// the same applyLocal() logic used in solo mode.
+// All players subscribe to the same channel (room code).
+// Every game action is broadcast to all peers who apply it
+// locally. On join, REQ_ANNOUNCE causes existing players to
+// reply with full state so latecomers sync up instantly.
 // ═══════════════════════════════════════════════════════════
 
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL  || ''
@@ -488,44 +489,106 @@ function startGame() {
   R()
 
   prefetchDeck([...(S.myDeck.commanders||[]), ...S.myDeck.cards], (done,total) => {
-    if (done===total) { R(); toast('All card art loaded ✓','good') }
+    if (done===total) { R(); toast('All card art loaded','good') }
   })
 
   const sb = getSupabase()
   if (!sb) {
-    toast('Solo mode — add Supabase keys in .env to play online','warn')
+    toast('Solo mode — add Supabase keys to play online','warn')
     return
   }
 
-  // Leave any existing channel
   if (_channel) { sb.removeChannel(_channel); _channel = null }
 
-  // Channel name = room code (all players with same code join same channel)
-  _channel = sb.channel(`edh-room-${S.roomId}`, {
-    config: { broadcast: { self: false } }  // don't receive own messages
+  _channel = sb.channel('edh:'+S.roomId, {
+    config: { broadcast: { self: false, ack: false } }
   })
 
   _channel
     .on('broadcast', { event: 'game' }, ({ payload }) => {
-      handleMsg(payload)
+      handlePeerMsg(payload)
     })
     .subscribe(status => {
       if (status === 'SUBSCRIBED') {
-        // Announce join to all existing players
-        broadcast({ type:'JOIN', playerId:S.playerId, name:S.myName, color:S.myColor, deckList:lib, commandZone, startLife:S.startLife })
-        // Ask existing players to send us their state
-        broadcast({ type:'REQ_STATE', fromPlayerId:S.playerId })
-        sysMsg(`${S.myName} joined the game`)
-        toast('Connected! Share the room code with friends.','good')
-      } else if (status === 'CHANNEL_ERROR') {
-        toast('Connection error — check Supabase keys','warn')
+        // Tell everyone we joined (sends our full player state)
+        netSend({ type:'ANNOUNCE',
+          playerId:S.playerId, name:S.myName, color:S.myColor,
+          deckList:lib, commandZone:commandZone, startLife:S.startLife })
+        // Ask everyone already in the room to re-announce themselves to us
+        netSend({ type:'REQ_ANNOUNCE', fromId:S.playerId })
+        sysMsg(S.myName+' joined')
+        toast('Connected! Room code: '+S.roomId,'good')
+        R()
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        toast('Connection error — check Supabase keys in GitHub Secrets','warn')
       }
     })
 }
 
-function broadcast(msg) {
-  _channel?.send({ type:'broadcast', event:'game', payload:msg })
-  // Also apply locally (so sender sees their own actions immediately)
+// Send ONLY to peers over the network (does NOT apply locally)
+function netSend(msg) {
+  if (_channel) {
+    _channel.send({ type:'broadcast', event:'game', payload:{ ...msg, _from:S.playerId } })
+  }
+}
+
+// send() = apply locally first, then send to all peers
+// Used for all game actions (tap, move card, life change, etc.)
+function send(msg) {
+  applyLocal(msg)
+  netSend(msg)
+}
+
+// Handle a message that came FROM a peer over the network
+function handlePeerMsg(msg) {
+  if (!S.gs) return
+  if (msg._from === S.playerId) return  // ignore own echoes
+
+  if (msg.type === 'ANNOUNCE') {
+    // A peer announced themselves — register them in our local game state
+    const pid = msg.playerId
+    if (!pid) return
+    if (!S.gs.playerOrder.includes(pid)) S.gs.playerOrder.push(pid)
+    const snap = msg.snapshot || {}
+    S.gs.players[pid] = {
+      id:pid, name:msg.name||'?', color:msg.color||'#888',
+      life: typeof snap.life === 'number' ? snap.life : (msg.startLife||40),
+      cmdDmg: snap.cmdDmg || {},
+      mana: snap.mana || {W:0,U:0,B:0,R:0,G:0,C:0},
+      counters: snap.counters || {poison:0,energy:0,exp:0,rad:0},
+      hand: snap.hand || [],
+      battlefield: snap.battlefield || [],
+      graveyard: snap.graveyard || [],
+      exile: snap.exile || [],
+      commandZone: snap.commandZone || msg.commandZone || [],
+      library: msg.deckList || [],
+      libraryCount: typeof snap.libraryCount === 'number' ? snap.libraryCount : (msg.deckList||[]).length,
+      connected: true,
+    }
+    sysMsg((msg.name||'Someone')+' joined the game')
+    R()
+    return
+  }
+
+  if (msg.type === 'REQ_ANNOUNCE') {
+    // A new player is asking us to re-announce — reply with our full current state
+    if (msg.fromId === S.playerId) return
+    const me = S.gs.players[S.playerId]
+    if (!me) return
+    netSend({
+      type:'ANNOUNCE',
+      playerId:S.playerId, name:S.myName, color:S.myColor,
+      deckList:me.library, commandZone:me.commandZone, startLife:S.startLife,
+      snapshot: {
+        life:me.life, cmdDmg:me.cmdDmg, mana:me.mana, counters:me.counters,
+        hand:me.hand, battlefield:me.battlefield, graveyard:me.graveyard,
+        exile:me.exile, commandZone:me.commandZone, libraryCount:me.libraryCount,
+      }
+    })
+    return
+  }
+
+  // All other messages are game actions — apply to the sending peer's state
   applyLocal(msg)
 }
 
@@ -536,78 +599,24 @@ function makeLocalState(lib, commandZone) {
     mana:{W:0,U:0,B:0,R:0,G:0,C:0},
     counters:{poison:0,energy:0,exp:0,rad:0},
     hand:[], battlefield:[], graveyard:[], exile:[],
-    commandZone, library:lib, libraryCount:lib.length, connected:true,
+    commandZone:commandZone, library:lib, libraryCount:lib.length, connected:true,
   }
-  return { players:{[S.playerId]:p}, playerOrder:[S.playerId], turn:1, activePlayerIdx:0, phase:'Untap', stack:[], stackCounter:0, chat:[] }
-}
-
-// Called for INCOMING messages from OTHER players
-function handleMsg(msg) {
-  if (!S.gs) return
-
-  // Another player is requesting our state — send them a snapshot
-  if (msg.type === 'REQ_STATE') {
-    if (msg.fromPlayerId !== S.playerId) {
-      // Broadcast our current player state so the new joiner can build their view
-      const me = S.gs.players[S.playerId]
-      if (me) {
-        _channel?.send({ type:'broadcast', event:'game', payload:{
-          type:'JOIN',
-          playerId:S.playerId, name:S.myName, color:S.myColor,
-          deckList:me.library, commandZone:me.commandZone,
-          startLife:S.startLife,
-          // Send current state snapshot
-          stateSnapshot: {
-            life:me.life, cmdDmg:me.cmdDmg, mana:me.mana, counters:me.counters,
-            hand:me.hand, battlefield:me.battlefield, graveyard:me.graveyard,
-            exile:me.exile, libraryCount:me.libraryCount
-          }
-        }})
-      }
-    }
-    return
-  }
-
-  applyLocal(msg)
-}
-
-// send() now broadcasts to all peers AND applies locally
-function send(msg) {
-  if (_channel && _channel.state === 'joined') {
-    broadcast(msg)
-  } else {
-    applyLocal(msg)
+  return {
+    players:{[S.playerId]:p}, playerOrder:[S.playerId],
+    turn:1, activePlayerIdx:0, phase:'Untap',
+    stack:[], stackCounter:0, chat:[]
   }
 }
+
 
 function applyLocal(msg) {
   if (!S.gs) return
   const gs=S.gs, me=gs.players[S.playerId]
   if (!me) return
   switch(msg.type) {
-    case 'JOIN': {
-      // A peer joined — add them to our local game state so we can see their board
-      const { playerId, name, color, deckList, commandZone, startLife, stateSnapshot } = msg
-      if (playerId === S.playerId) break  // ignore own join echo
-      if (!gs.playerOrder.includes(playerId)) gs.playerOrder.push(playerId)
-      const snap = stateSnapshot || {}
-      gs.players[playerId] = {
-        id:playerId, name, color,
-        life: snap.life || startLife || 40,
-        cmdDmg: snap.cmdDmg || {},
-        mana: snap.mana || {W:0,U:0,B:0,R:0,G:0,C:0},
-        counters: snap.counters || {poison:0,energy:0,exp:0,rad:0},
-        hand: snap.hand || [],
-        battlefield: snap.battlefield || [],
-        graveyard: snap.graveyard || [],
-        exile: snap.exile || [],
-        commandZone: commandZone || [],
-        library: deckList || [],
-        libraryCount: snap.libraryCount || (deckList||[]).length,
-        connected: true,
-      }
-      break
-    }
+    case 'JOIN':
+    case 'ANNOUNCE':
+    case 'REQ_ANNOUNCE': break  // handled by handlePeerMsg, not applyLocal
     case 'PLAYER_UPDATE': {
       const target = gs.players[msg.playerId]
       if (target) Object.assign(target, msg.patch)
