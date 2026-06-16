@@ -851,24 +851,38 @@ function buildGame() {
     const id = parseInt(e.dataTransfer.getData('cid'))
     const from = e.dataTransfer.getData('from')
     if (!id || !from) return
+    // Calculate drop position relative to battlefield element
+    const bfRect2 = bfEl.getBoundingClientRect()
+    const dropX = e.clientX - bfRect2.left - 36  // center card on cursor
+    const dropY = e.clientY - bfRect2.top  - 50
+    const setPos = (card) => { card.bfX = Math.max(0,dropX); card.bfY = Math.max(0,dropY) }
     if (from === 'hand') {
       const card = me.hand?.find(c=>c.id===id)
-      if (card) gPlayCard(card)
+      if (card) { setPos(card); gPlayCard(card) }
     } else if (from === 'commandZone') {
       const card = me.commandZone?.find(c=>c.id===id)
-      if (card) gCastCommander(card)
-    } else if (from !== 'battlefield') {
-      gMoveCard(id, from, 'battlefield')
+      if (card) { setPos(card); gCastCommander(card) }
+    } else if (from === 'battlefield') {
+      // already handled by mousedown drag — nothing to do
+    } else {
+      // From GY, exile, etc — move to battlefield at drop position
+      const actor = me
+      const src = actor[from]
+      const card = src?.find(c=>c.id===id)
+      if (card) { setPos(card); gMoveCard(id, from, 'battlefield') }
     }
   })
 
   // ── Drag & drop: mini-zones ──
   const wireZoneDrop = (zoneEl, targetZone) => {
     if (!zoneEl) return
-    zoneEl.addEventListener('dragover', e => { e.preventDefault(); zoneEl.classList.add('drag-over') })
-    zoneEl.addEventListener('dragleave', () => zoneEl.classList.remove('drag-over'))
+    let isDragOver = false
+    zoneEl.addEventListener('dragenter', e => { e.preventDefault(); e.stopPropagation(); isDragOver=true; zoneEl.classList.add('drag-over') })
+    zoneEl.addEventListener('dragover',  e => { e.preventDefault(); e.stopPropagation(); zoneEl.classList.add('drag-over') })
+    zoneEl.addEventListener('dragleave', e => { isDragOver=false; setTimeout(()=>{ if(!isDragOver) zoneEl.classList.remove('drag-over') },50) })
     zoneEl.addEventListener('drop', e => {
-      e.preventDefault(); zoneEl.classList.remove('drag-over')
+      e.preventDefault(); e.stopPropagation()
+      isDragOver=false; zoneEl.classList.remove('drag-over')
       const id = parseInt(e.dataTransfer.getData('cid'))
       const from = e.dataTransfer.getData('from')
       if (!id || !from || from === targetZone) return
@@ -882,8 +896,10 @@ function buildGame() {
 
   // ── Drag & drop: hand ──
   const handWrap = el.querySelector('.g-hand-wrap')
-  handWrap.addEventListener('dragover', e => { e.preventDefault(); handWrap.classList.add('drag-over') })
-  handWrap.addEventListener('dragleave', () => handWrap.classList.remove('drag-over'))
+  let handDragOver = false
+  handWrap.addEventListener('dragenter', e => { e.preventDefault(); handDragOver=true; handWrap.classList.add('drag-over') })
+  handWrap.addEventListener('dragover',  e => { e.preventDefault(); e.stopPropagation(); handWrap.classList.add('drag-over') })
+  handWrap.addEventListener('dragleave', () => { handDragOver=false; setTimeout(()=>{ if(!handDragOver) handWrap.classList.remove('drag-over') },50) })
   handWrap.addEventListener('drop', e => {
     e.preventDefault(); handWrap.classList.remove('drag-over')
     const id = parseInt(e.dataTransfer.getData('cid'))
@@ -894,7 +910,7 @@ function buildGame() {
   })
 
   // ── Resizable panels ──
-  wireResize(el.querySelector('#bottom-resize'), 'v', h => {
+  wireResize(el.querySelector('#bottom-resize'), 'v-inv', h => {
     document.documentElement.style.setProperty('--bottom-strip-h', `${h}px`)
     localStorage.setItem('edh_bottomstrip_h', h)
   }, () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--bottom-strip-h')||'148'), 90, 320)
@@ -1044,9 +1060,20 @@ function makeBfCardEl(card, readOnly=false) {
   if (card.summoningSick) el.innerHTML += '<div class="card-sick">∑</div>'
   if (card.token) el.innerHTML += '<div class="card-tok">T</div>'
 
-  el.addEventListener('click', e=>{ e.stopPropagation(); openCardModal(card, readOnly?'view':'battlefield') })
   if (!readOnly) {
+    // Left click = tap/untap
+    el.addEventListener('click', e=>{
+      e.stopPropagation()
+      // Only tap if not a drag (mousedown+mouseup without move)
+      if (!el._didDrag) gTapCard(card,'battlefield')
+      el._didDrag = false
+    })
+    el.addEventListener('mousedown', ()=>{ el._didDrag=false })
+    el.addEventListener('mousemove', ()=>{ el._didDrag=true })
+    // Right click = full action menu with card detail
     el.addEventListener('contextmenu', e=>{ e.preventDefault(); showBfCtx(card,e) })
+  } else {
+    el.addEventListener('click', e=>{ e.stopPropagation(); openCardModal(card,'view') })
   }
   return el
 }
@@ -1249,7 +1276,7 @@ function renderStats(el, me, opponents) {
       <button class="rp-btn primary" id="rp-mulligan">Mulligan</button>
       <button class="rp-btn" id="rp-shuffle">Shuffle</button>
       <button class="rp-btn" id="rp-scry1">Scry 1</button>
-      <button class="rp-btn" id="rp-treasure">Treasure Token</button>
+      <button class="rp-btn" id="rp-token-search">🔍 Search Tokens…</button>
       <button class="rp-btn" id="rp-token">Custom Token…</button>
       <button class="rp-btn" id="rp-viewtop">View Top Cards…</button>
     </div>
@@ -1294,8 +1321,8 @@ function renderStats(el, me, opponents) {
   rp.querySelector('#rp-mulligan').addEventListener('click',()=>gMulligan())
   rp.querySelector('#rp-shuffle').addEventListener('click',()=>{ send({type:'SHUFFLE',playerId:S.playerId}); sysMsg(`${S.myName} shuffled`); toast('Shuffled','good') })
   rp.querySelector('#rp-scry1').addEventListener('click',()=>gScry(1))
-  rp.querySelector('#rp-treasure').addEventListener('click',()=>gCreateToken('Treasure','Artifact Token','T, Sacrifice: Add one mana of any color.'))
   rp.querySelector('#rp-token').addEventListener('click',()=>{ const n=prompt('Token name:'); if(n) gCreateToken(n,'Token Creature','',n.match(/\d+\/\d+/)?.[0]||'') })
+  rp.querySelector('#rp-token-search').addEventListener('click',()=>openTokenSearch())
   rp.querySelector('#rp-viewtop').addEventListener('click',()=>openLibraryTopModal())
 }
 
@@ -1462,6 +1489,7 @@ function openZoneModal(title, cards, zone, readOnly=false, searchable=false) { S
 function openViewModal(card) { S.modal={type:'card',card,zone:'view',readOnly:true}; R() }
 function openCountersModal(card, zone) { S.modal={type:'counters',card,zone}; R() }
 function openBoardModal(player) { S.viewingPlayer = player.id; R() }
+function openTokenSearch() { S.modal={type:'tokensearch',query:'',results:[]}; R() }
 
 function buildModal() {
   const m=S.modal; if(!m) return document.createDocumentFragment()
@@ -1666,6 +1694,87 @@ function buildModal() {
     renderGrid()
   }
 
+  else if (m.type==='tokensearch') {
+    bg.innerHTML=`<div class="modal" style="max-width:560px;width:95vw">
+      <div class="modal-hdr"><h3>🎴 Search Tokens</h3><button class="x-btn" id="ts-close">✕</button></div>
+      <div class="modal-body" style="gap:.4rem">
+        <div style="display:flex;gap:.4rem">
+          <input id="ts-q" class="db-si" placeholder="Search token name e.g. Goblin, Soldier, Treasure…" style="flex:1" />
+          <button class="db-sbtn" id="ts-go">Search</button>
+        </div>
+        <div style="font-size:.7rem;color:var(--text3)">Official Scryfall token art. Click any token to create it on your battlefield.</div>
+        <div id="ts-results" style="display:flex;flex-wrap:wrap;gap:.5rem;overflow-y:auto;max-height:380px;padding:.2rem 0"></div>
+      </div>
+    </div>`
+    bg.querySelector('#ts-close').addEventListener('click',()=>{S.modal=null;R()})
+    bg.addEventListener('click',e=>{if(e.target===bg){S.modal=null;R()}})
+
+    const doSearch = async () => {
+      const q = bg.querySelector('#ts-q').value.trim()
+      if (!q) return
+      const res = bg.querySelector('#ts-results')
+      res.innerHTML = '<div class="empty-hint">Searching Scryfall tokens…</div>'
+      try {
+        // Search Scryfall for tokens matching the query
+        const resp = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q+' t:token')}&unique=art&order=name`)
+        if (!resp.ok) { res.innerHTML='<div class="empty-hint">No token results found.</div>'; return }
+        const data = await resp.json()
+        res.innerHTML = ''
+        if (!data.data?.length) { res.innerHTML='<div class="empty-hint">No tokens found.</div>'; return }
+        data.data.slice(0,40).forEach(card => {
+          const imgUri = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || ''
+          const smallUri = card.image_uris?.small || card.card_faces?.[0]?.image_uris?.small || ''
+          if (!imgUri) return
+          const wrap = div('zc-wrap')
+          wrap.style.cssText='cursor:pointer;'
+          const img = document.createElement('img')
+          img.src = smallUri || imgUri
+          img.loading = 'lazy'
+          img.style.cssText='width:74px;height:103px;object-fit:cover;border-radius:4px;border:1.5px solid var(--border2);transition:border-color .12s'
+          img.addEventListener('mouseenter',()=>img.style.borderColor='var(--gold)')
+          img.addEventListener('mouseleave',()=>img.style.borderColor='var(--border2)')
+          const lbl = div('zc-label')
+          lbl.textContent = card.name
+          const pt = (card.power&&card.toughness)?card.power+'/'+card.toughness:''
+          wrap.appendChild(img)
+          wrap.appendChild(lbl)
+          if (pt) wrap.appendChild(Object.assign(div('zc-label'),{textContent:pt,style:'color:var(--gold3)'}))
+          wrap.addEventListener('click', ()=>{
+            const token = {
+              id:++S.cardIdCounter,
+              name:card.name,
+              type_line:card.type_line||'Token',
+              oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
+              mana_cost:'',
+              image_uri:imgUri,
+              pt,
+              tapped:false,
+              summoningSick:false,
+              counters:{},
+              token:true,
+            }
+            const p = S.gs?.players?.[S.playerId]
+            if (!p) return
+            if (!p.battlefield) p.battlefield=[]
+            p.battlefield.push(token)
+            send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{battlefield:[...p.battlefield]}})
+            toast('Token created: '+card.name,'good')
+            sysMsg(S.myName+' created '+card.name+' token')
+            S.modal=null; R()
+          })
+          res.appendChild(wrap)
+        })
+      } catch(err) {
+        res.innerHTML='<div class="empty-hint">Search failed — check internet connection.</div>'
+      }
+    }
+
+    bg.querySelector('#ts-go').addEventListener('click', doSearch)
+    bg.querySelector('#ts-q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch() })
+    // Auto-search common tokens if empty
+    setTimeout(()=>{ bg.querySelector('#ts-q').focus() }, 50)
+  }
+
   return bg
 }
 
@@ -1718,14 +1827,21 @@ function getCardActions(card, zone) {
 
 function showBfCtx(card,e) {
   showCtxAt(e.clientX,e.clientY,[
-    {head:card.name},
-    {label:card.tapped?'↺ Untap':'↷ Tap', action:()=>gTapCard(card,'battlefield')},
-    {label:'🔵 Manage counters', action:()=>openCountersModal(card,'battlefield')},
-    {label:'☠ Destroy →GY', action:()=>{ gMoveCard(card.id,'battlefield','graveyard'); sysMsg(`${S.myName}: ${card.name}→GY`) }},
-    {label:'✦ Exile',        action:()=>gMoveCard(card.id,'battlefield','exile')},
-    {label:'↩ Bounce',       action:()=>gMoveCard(card.id,'battlefield','hand')},
+    {head: card.name + (card.mana_cost?' · '+card.mana_cost:'')},
+    {head: (card.type_line||'') + (card.pt?' · '+card.pt:'') + (card.commanderTax?' · Tax +'+card.commanderTax:'')},
     {sep:true},
-    {label:'🔍 View details', action:()=>openCardModal(card,'battlefield')},
+    {label:card.tapped?'↺ Untap':'↷ Tap',                action:()=>gTapCard(card,'battlefield')},
+    {label:'⚔ Declare as attacker',                       action:()=>{ gTapCard(card,'battlefield'); send({type:'STACK_PUSH',playerId:S.playerId,name:card.name+' attacks',card:null}); sysMsg(S.myName+' attacks with '+card.name) }},
+    {label:'🔵 Manage counters…',                          action:()=>openCountersModal(card,'battlefield')},
+    {label:'⚡ Activate ability…',                         action:()=>{ const ab=prompt('Ability:'); if(ab){send({type:'STACK_PUSH',playerId:S.playerId,name:card.name+': '+ab,card:null});sysMsg(S.myName+' activates '+card.name+': '+ab)} }},
+    {sep:true},
+    {label:'☠ Destroy → Graveyard',                      action:()=>{ gMoveCard(card.id,'battlefield','graveyard'); sysMsg(S.myName+': '+card.name+'→GY') }},
+    {label:'✦ Exile',                                      action:()=>{ gMoveCard(card.id,'battlefield','exile'); sysMsg(S.myName+': '+card.name+'→exile') }},
+    {label:'↩ Bounce to hand',                            action:()=>{ gMoveCard(card.id,'battlefield','hand'); sysMsg(S.myName+': '+card.name+'→hand') }},
+    {label:'📚 Return to library (bottom)',               action:()=>gMoveCard(card.id,'battlefield','library_bottom')},
+    {label:'👑 Return to command zone',                   action:()=>gMoveCard(card.id,'battlefield','commandZone')},
+    {sep:true},
+    {label:'🔍 View full card details',                   action:()=>openCardModal(card,'battlefield')},
   ])
 }
 function showHandCtx(card,e) {
@@ -1819,28 +1935,30 @@ function div(cls='', html='') { const el=document.createElement('div'); if(cls) 
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 
 // Drag-resize helper.
-// mode: 'v' = drag changes height (handle is horizontal, on top edge)
-//       'h' = drag changes width, growing to the right
-//       'h-rev' = drag changes width, growing to the left (handle on left edge)
+// mode: 'v'     = drag down increases height (handle on bottom edge)
+//       'v-inv' = drag up increases height (handle on top edge of bottom strip)
+//       'h'     = drag right increases width
+//       'h-rev' = drag left increases width (handle on left edge)
 function wireResize(handle, mode, onChange, getCurrent, min, max) {
   if (!handle) return
   let startPos=0, startVal=0, dragging=false
+  const isV = mode==='v' || mode==='v-inv'
   const onMove = e => {
     if (!dragging) return
-    const pos = mode==='v' ? e.clientY : e.clientX
+    const pos = isV ? e.clientY : e.clientX
     let delta = pos - startPos
-    if (mode==='h-rev') delta = -delta
+    if (mode==='h-rev' || mode==='v-inv') delta = -delta
     let val = startVal + delta
     val = Math.max(min, Math.min(max, val))
     onChange(val)
   }
   const onUp = () => { dragging=false; document.body.style.cursor=''; document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp) }
   handle.addEventListener('mousedown', e => {
-    e.preventDefault()
+    e.preventDefault(); e.stopPropagation()
     dragging=true
-    startPos = mode==='v' ? e.clientY : e.clientX
+    startPos = isV ? e.clientY : e.clientX
     startVal = getCurrent()
-    document.body.style.cursor = mode==='v' ? 'row-resize' : 'col-resize'
+    document.body.style.cursor = isV ? 'row-resize' : 'col-resize'
     document.addEventListener('mousemove',onMove)
     document.addEventListener('mouseup',onUp)
   })

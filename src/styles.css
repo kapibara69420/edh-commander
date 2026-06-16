@@ -143,8 +143,8 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .g-body.many-opps{flex-direction:column}
 
 /* Resize handles */
-.resize-handle-h{position:absolute;left:0;right:0;bottom:-4px;height:8px;cursor:row-resize;z-index:15}
-.resize-handle-h:hover{background:rgba(200,150,40,.3)}
+.resize-handle-h{position:absolute;left:0;right:0;top:-4px;height:8px;cursor:row-resize;z-index:15;background:transparent}
+.resize-handle-h:hover,.resize-handle-h:active{background:rgba(200,150,40,.3)}
 .resize-handle-v{position:absolute;top:0;bottom:0;right:-4px;width:8px;cursor:col-resize;z-index:15}
 .resize-handle-v:hover{background:rgba(200,150,40,.3)}
 .resize-handle-v.left-edge{right:auto;left:-4px}
