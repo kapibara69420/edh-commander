@@ -160,22 +160,32 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .g-center{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 
 /* Battlefield */
-.g-bf{flex:1;overflow:auto;background:var(--bg0);position:relative;display:flex;flex-direction:column;min-height:160px}
+/* ── Board tab bar + card size slider ── */
+.board-tabbar{background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.5rem;padding:.28rem .7rem;flex-shrink:0;overflow-x:auto}
+.board-tab-lbl{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;flex-shrink:0}
+.board-tabs{display:flex;gap:.25rem;flex:1;overflow-x:auto}
+.board-tab{background:var(--bg3);border:1px solid var(--border);border-radius:20px;color:var(--text2);font-size:.72rem;padding:.2rem .65rem;cursor:pointer;white-space:nowrap;transition:all .12s;flex-shrink:0}
+.board-tab:hover{border-color:var(--border2);color:var(--text)}
+.board-tab.active{background:var(--gold);border-color:var(--gold);color:#160f00;font-weight:700}
+.card-size-ctrl{display:flex;align-items:center;gap:.4rem;flex-shrink:0;margin-left:auto}
+.cs-lbl{font-size:.65rem;color:var(--text3);white-space:nowrap}
+.cs-slider{width:90px;accent-color:var(--gold);cursor:pointer}
+.cs-val{font-size:.7rem;color:var(--gold2);min-width:38px;font-weight:700}
+
+/* ── Free-placement battlefield ── */
+.g-bf{flex:1;overflow:auto;background:var(--bg0);position:relative;min-height:160px}
 .bf-hint{font-size:.68rem;color:var(--text4);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;user-select:none}
-.g-bf.drag-over{background:rgba(200,150,40,.05);outline:2px dashed var(--gold);outline-offset:-4px}
+.g-bf.drag-over{background:rgba(200,150,40,.05);outline:2px dashed rgba(200,150,40,.4);outline-offset:-4px}
 .g-minizone.drag-over,.g-hand-wrap.drag-over{background:rgba(200,150,40,.1);outline:2px dashed var(--gold);outline-offset:-2px}
-.bf-section{padding:.3rem .5rem .2rem;border-bottom:1px solid var(--border)}
-.bf-section:last-child{border-bottom:none}
-.bf-sec-label{font-size:.6rem;color:var(--text4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.28rem;user-select:none;pointer-events:none}
+.opp-view-banner{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.8);border:1px solid var(--border2);border-radius:20px;font-size:.75rem;color:var(--text2);padding:.25rem 1rem;pointer-events:none;z-index:20;white-space:nowrap}
 .bf-sec-cards{display:flex;flex-wrap:wrap;gap:4px;align-content:flex-start}
 
 /* Cards on battlefield */
-.bf-card{width:var(--card-w);height:var(--card-h);border-radius:4px;border:1.5px solid var(--border2);overflow:hidden;background:var(--bg3);cursor:grab;flex-shrink:0;transition:transform .12s,border-color .12s;position:relative}
-.bf-card:hover{border-color:var(--gold);transform:translateY(-3px) scale(1.07);z-index:5}
-.bf-card:active{cursor:grabbing}
-.bf-card.tapped{transform:rotate(90deg);margin:14px 6px}
-.bf-card.tapped:hover{transform:rotate(90deg) translateY(-3px) scale(1.06)}
-.bf-card img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+.bf-card{border-radius:4px;border:1.5px solid var(--border2);overflow:hidden;background:var(--bg3);cursor:grab;position:absolute;transition:border-color .12s,box-shadow .12s;user-select:none}
+.bf-card:hover{border-color:var(--gold);box-shadow:0 4px 20px rgba(0,0,0,.6);z-index:5}
+.bf-card:active{cursor:grabbing;z-index:10;box-shadow:0 8px 28px rgba(0,0,0,.8)}
+.bf-card.tapped{transform:rotate(90deg)}
+.bf-card img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;border-radius:3px}
 .card-face{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:3px;background:var(--bg4)}
 .cf-name{font-size:.5rem;font-weight:600;color:var(--text2);text-align:center;line-height:1.2;word-break:break-word}
 .cf-type{font-size:.44rem;color:var(--text3);text-align:center}

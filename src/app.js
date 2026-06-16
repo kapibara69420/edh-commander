@@ -24,6 +24,8 @@ const S = {
   modal: null,            // { type: 'card'|'zone'|'search'|'counters', ...data }
   cardIdCounter: 0,
   db: { activeDeckId: null, tab: 'list' },
+  cardScale: parseFloat(localStorage.getItem('edh_card_scale') || '1'),
+  viewingPlayer: null,    // null = my board, playerId = viewing that opponent's board
 }
 
 const COLORS = ['#3a7acc','#d44040','#35955a','#c8952a','#7a48c0','#289888','#cc6633']
@@ -723,6 +725,20 @@ function buildGame() {
     </div>
   </div>
 
+  <!-- ── BOARD TABS + CARD SIZE ── -->
+  <div class="board-tabbar" id="board-tabbar">
+    <span class="board-tab-lbl">Viewing:</span>
+    <div class="board-tabs" id="board-tabs">
+      <button class="board-tab${!S.viewingPlayer?' active':''}" data-pid="me">🧙 My Board</button>
+      ${opponents.map(op=>`<button class="board-tab${S.viewingPlayer===op.id?' active':''}" data-pid="${op.id}" style="border-color:${op.color};color:${S.viewingPlayer===op.id?'#160f00':op.color};${S.viewingPlayer===op.id?'background:'+op.color:''}">${esc(op.name)}</button>`).join('')}
+    </div>
+    <div class="card-size-ctrl">
+      <span class="cs-lbl">Card size</span>
+      <input type="range" id="card-size-slider" min="0.5" max="2" step="0.05" value="${S.cardScale}" class="cs-slider" />
+      <span class="cs-val" id="cs-val">${Math.round(S.cardScale*100)}%</span>
+    </div>
+  </div>
+
   <!-- ── STACK BAR ── -->
   <div class="g-stack" id="g-stack"></div>
 
@@ -808,6 +824,23 @@ function buildGame() {
   el.querySelector('#g-dice').addEventListener('click', ()=>{ const r=Math.floor(Math.random()*20)+1; sysMsg(`🎲 ${S.myName} rolled d20: ${r}`); toast(`d20: ${r}`,'gold') })
   el.querySelector('#g-coin').addEventListener('click', ()=>{ const r=Math.random()<.5?'Heads':'Tails'; sysMsg(`🪙 ${S.myName}: ${r}`); toast(r,'gold') })
   el.querySelector('#g-quit').addEventListener('click', ()=>{ if(confirm('Leave game?')){ if(_channel) getSupabase()?.removeChannel(_channel); _channel=null; S.gs=null;S.screen='lobby';R()} })
+
+  // ── Board tabs (switch between my board and opponent boards) ──
+  el.querySelector('#board-tabs').addEventListener('click', e => {
+    const btn = e.target.closest('.board-tab'); if (!btn) return
+    S.viewingPlayer = btn.dataset.pid === 'me' ? null : btn.dataset.pid
+    R()
+  })
+
+  // ── Card size slider ──
+  el.querySelector('#card-size-slider').addEventListener('input', e => {
+    S.cardScale = parseFloat(e.target.value)
+    localStorage.setItem('edh_card_scale', S.cardScale)
+    el.querySelector('#cs-val').textContent = Math.round(S.cardScale*100)+'%'
+    // Re-render just the battlefield without full R() for performance
+    const viewing = S.viewingPlayer ? gs.players[S.viewingPlayer] : me
+    if (viewing) renderBf(el, viewing, !!S.viewingPlayer)
+  })
 
   // ── Drag & drop: battlefield ──
   const bfEl = el.querySelector('#g-bf')
@@ -909,54 +942,93 @@ function buildGame() {
     if (ev.key==='u'||ev.key==='U') gUntapAll()
   }
 
-  renderBf(el, me)
-  renderMiniZones(el, me)
-  renderHand(el, me)
+  // Determine whose board we're viewing
+  const viewedPlayer = S.viewingPlayer ? gs.players[S.viewingPlayer] : me
+  const isViewingOpp = !!S.viewingPlayer
+
+  renderBf(el, viewedPlayer || me, isViewingOpp)
+  renderMiniZones(el, isViewingOpp ? viewedPlayer : me, isViewingOpp)
+  renderHand(el, isViewingOpp ? viewedPlayer : me, isViewingOpp)
   renderOpponents(el, opponents, gs)
   renderStats(el, me, opponents)
   renderStack(el, gs)
+
+  // Show viewing banner when on opponent's board
+  if (isViewingOpp && viewedPlayer) {
+    const bf = el.querySelector('#g-bf')
+    const banner = div('opp-view-banner')
+    banner.innerHTML = `👁 Viewing <b style="color:${viewedPlayer.color}">${esc(viewedPlayer.name)}</b>'s board — read only`
+    if (bf) bf.prepend(banner)
+  }
 
   return el
 }
 
 // ── Battlefield ──
-function renderBf(el, me) {
+function renderBf(el, me, readOnly=false) {
   const bf = el.querySelector('#g-bf'); if (!bf) return
-  bf.querySelectorAll('.bf-hint,.bf-section').forEach(x=>x.remove())
-
-  const sections = [
-    { key:'lands',   label:'Lands',                   test: t=>t.includes('land') },
-    { key:'cre',     label:'Creatures',                test: t=>t.includes('creature') },
-    { key:'artench', label:'Artifacts & Enchantments', test: t=>t.includes('artifact')||t.includes('enchantment') },
-    { key:'pw',      label:'Planeswalkers',            test: t=>t.includes('planeswalker') },
-    { key:'other',   label:'Other',                   test: ()=>true },
-  ]
+  bf.innerHTML = ''
 
   if (!me.battlefield?.length) {
-    bf.innerHTML = '<span class="bf-hint">Battlefield — cards you play appear here</span>'
+    bf.innerHTML = '<span class="bf-hint">Battlefield — drag cards here to play them</span>'
     return
   }
 
-  bf.innerHTML = ''
-  for (const sec of sections) {
-    const cards = me.battlefield.filter(c => {
-      const t=(c.type_line||'').toLowerCase()
-      if (sec.key==='other') return !sections.slice(0,-1).some(s=>s.test(t))
-      return sec.test(t)
-    })
-    if (!cards.length) continue
-    const secEl = div('bf-section')
-    secEl.innerHTML = `<div class="bf-sec-label">${sec.label}</div><div class="bf-sec-cards" id="bfs-${sec.key}"></div>`
-    const cardsEl = secEl.querySelector(`#bfs-${sec.key}`)
-    cards.forEach(c => cardsEl.appendChild(makeBfCardEl(c)))
-    bf.appendChild(secEl)
-  }
+  // Free-placement: each card has stored x,y or gets auto-placed
+  let autoX = 12, autoY = 12
+  const bfRect = bf.getBoundingClientRect()
+  const cardW = S.cardScale * 72
+  const cardH = S.cardScale * 100
+
+  me.battlefield.forEach((card, i) => {
+    // Auto-assign position if not set
+    if (card.bfX === undefined) {
+      card.bfX = autoX
+      card.bfY = autoY
+      autoX += cardW + 8
+      if (autoX + cardW > (bfRect.width||800) - 12) { autoX = 12; autoY += cardH + 8 }
+    }
+    const el2 = makeBfCardEl(card, readOnly)
+    el2.style.position = 'absolute'
+    el2.style.left = card.bfX + 'px'
+    el2.style.top  = card.bfY + 'px'
+    el2.style.width  = cardW + 'px'
+    el2.style.height = cardH + 'px'
+    if (!readOnly) {
+      // Drag to reposition within battlefield
+      el2.addEventListener('mousedown', e => {
+        if (e.button !== 0) return
+        e.stopPropagation()
+        const startX = e.clientX - card.bfX
+        const startY = e.clientY - card.bfY
+        let moved = false
+        const onMove = mv => {
+          moved = true
+          card.bfX = Math.max(0, mv.clientX - startX)
+          card.bfY = Math.max(0, mv.clientY - startY)
+          el2.style.left = card.bfX + 'px'
+          el2.style.top  = card.bfY + 'px'
+        }
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+          if (moved) {
+            // Sync position to peers
+            send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfX', value:card.bfX })
+            send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfY', value:card.bfY })
+          }
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+      })
+    }
+    bf.appendChild(el2)
+  })
 }
 
-function makeBfCardEl(card) {
+function makeBfCardEl(card, readOnly=false) {
   const el = div('bf-card'+(card.tapped?' tapped':''))
   el.dataset.id = card.id
-  el.draggable = true
   if (card.image_uri) {
     el.innerHTML = `<img src="${card.image_uri}" loading="lazy" draggable="false" />`
   } else {
@@ -972,9 +1044,10 @@ function makeBfCardEl(card) {
   if (card.summoningSick) el.innerHTML += '<div class="card-sick">∑</div>'
   if (card.token) el.innerHTML += '<div class="card-tok">T</div>'
 
-  el.addEventListener('click', e=>{ e.stopPropagation(); openCardModal(card,'battlefield') })
-  el.addEventListener('contextmenu', e=>{ e.preventDefault(); showBfCtx(card,e) })
-  el.addEventListener('dragstart', e=>{ e.dataTransfer.setData('cid',card.id); e.dataTransfer.setData('from','battlefield') })
+  el.addEventListener('click', e=>{ e.stopPropagation(); openCardModal(card, readOnly?'view':'battlefield') })
+  if (!readOnly) {
+    el.addEventListener('contextmenu', e=>{ e.preventDefault(); showBfCtx(card,e) })
+  }
   return el
 }
 
@@ -984,7 +1057,7 @@ function counterShort(key, val) {
 }
 
 // ── Mini zones (GY, Exile, Command, Library) ──
-function renderMiniZones(el, me) {
+function renderMiniZones(el, me, readOnly=false) {
   const makeEzCard = (card, zone) => {
     const d = div('ez-card')
     d.draggable = true
@@ -1035,7 +1108,7 @@ function renderMiniZones(el, me) {
 }
 
 // ── Hand ──
-function renderHand(el, me) {
+function renderHand(el, me, readOnly=false) {
   const handEl=el.querySelector('#g-hand'), countEl=el.querySelector('#hand-n')
   if (!handEl) return
   handEl.innerHTML=''
@@ -1388,7 +1461,7 @@ function openCardModal(card, zone) { S.modal={type:'card',card,zone}; R() }
 function openZoneModal(title, cards, zone, readOnly=false, searchable=false) { S.modal={type:'zone',title,cards,zone,readOnly,searchable,filter:''}; R() }
 function openViewModal(card) { S.modal={type:'card',card,zone:'view',readOnly:true}; R() }
 function openCountersModal(card, zone) { S.modal={type:'counters',card,zone}; R() }
-function openBoardModal(player) { S.modal={type:'board',player}; R() }
+function openBoardModal(player) { S.viewingPlayer = player.id; R() }
 
 function buildModal() {
   const m=S.modal; if(!m) return document.createDocumentFragment()
@@ -1591,47 +1664,6 @@ function buildModal() {
       })
     }
     renderGrid()
-  }
-
-  else if (m.type==='board') {
-    const p = m.player
-    const sections = [
-      ['Battlefield', p.battlefield||[]],
-      ['Command Zone', p.commandZone||[]],
-      ['Graveyard', p.graveyard||[]],
-      ['Exile', p.exile||[]],
-    ]
-    bg.innerHTML=`<div class="modal zone-modal" style="max-width:900px">
-      <div class="modal-hdr">
-        <div class="opp-dot" style="background:${p.color};margin-right:.4rem"></div>
-        <h3 style="color:${p.color}">${esc(p.name)}'s Board — Life ${p.life} · Hand ${p.hand?.length||0} · Library ${p.libraryCount||p.library?.length||0}</h3>
-        <button class="x-btn" id="board-close">✕</button>
-      </div>
-      <div class="board-sections" id="board-sections"></div>
-    </div>`
-    bg.querySelector('#board-close').addEventListener('click',()=>{S.modal=null;R()})
-    const wrap = bg.querySelector('#board-sections')
-    sections.forEach(([label,cards])=>{
-      const secEl = div('board-section')
-      secEl.innerHTML = `<div class="board-sec-label">${label} <span>${cards.length}</span></div>`
-      const grid = div('board-sec-cards')
-      if (!cards.length) grid.innerHTML='<div class="empty-hint">— empty —</div>'
-      cards.forEach(card=>{
-        const c = div('zc-wrap')
-        const img = div('zc-img')
-        if(card.image_uri) img.innerHTML=`<img src="${card.image_uri}" loading="lazy" />`
-        else { img.innerHTML=`<div class="zc-name">${esc(card.name)}</div>`; fetchCard(card.name).then(d=>{if(d?.image_uri){card.image_uri=d.image_uri;img.innerHTML=`<img src="${d.image_uri}" loading="lazy" />`}}) }
-        c.appendChild(img)
-        c.appendChild(Object.assign(div('zc-label'),{textContent:card.name}))
-        if (card.tapped) c.style.opacity='.6'
-        const ctrs=Object.entries(card.counters||{}).filter(([,v])=>v)
-        if(ctrs.length) c.appendChild(Object.assign(div('zc-label'),{textContent:ctrs.map(([k,v])=>`${k}:${v}`).join(', '),style:'color:var(--gold3)'}))
-        img.addEventListener('click',()=>openViewModal(card))
-        grid.appendChild(c)
-      })
-      secEl.appendChild(grid)
-      wrap.appendChild(secEl)
-    })
   }
 
   return bg
