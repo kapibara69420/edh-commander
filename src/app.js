@@ -528,11 +528,19 @@ function startGame() {
 }
 
 // Send ONLY to peers over the network (does NOT apply locally)
+const _sentIds = new Set()  // deduplicate: ignore messages we sent if they somehow echo back
 function netSend(msg) {
   if (_channel) {
-    _channel.send({ type:'broadcast', event:'game', payload:{ ...msg, _from:S.playerId } })
+    const mid = S.playerId + '_' + (++netSend._seq)
+    _sentIds.add(mid)
+    if (_sentIds.size > 200) {
+      const first = _sentIds.values().next().value
+      _sentIds.delete(first)
+    }
+    _channel.send({ type:'broadcast', event:'game', payload:{ ...msg, _from:S.playerId, _mid:mid } })
   }
 }
+netSend._seq = 0
 
 // send() = apply locally first, then send to all peers
 // Used for all game actions (tap, move card, life change, etc.)
@@ -544,7 +552,8 @@ function send(msg) {
 // Handle a message that came FROM a peer over the network
 function handlePeerMsg(msg) {
   if (!S.gs) return
-  if (msg._from === S.playerId) return  // ignore own echoes
+  if (msg._from === S.playerId) return  // ignore own echoes (safety)
+  if (msg._mid && _sentIds.has(msg._mid)) return  // already applied locally
 
   if (msg.type === 'ANNOUNCE') {
     // A peer announced themselves — register them in our local game state
@@ -1135,10 +1144,27 @@ function renderMiniZones(el, me, readOnly=false) {
 }
 
 // ── Hand ──
+// MTG card back image (official Scryfall asset)
+const CARD_BACK = 'https://backs.scryfall.io/large/back.jpg'
+
 function renderHand(el, me, readOnly=false) {
   const handEl=el.querySelector('#g-hand'), countEl=el.querySelector('#hand-n')
   if (!handEl) return
   handEl.innerHTML=''
+
+  if (readOnly) {
+    // Opponent's hand — show card backs only, count is real
+    const count = me.hand?.length || 0
+    for (let i = 0; i < count; i++) {
+      const d = div('hcard opp-hand-card')
+      d.innerHTML = `<img src="${CARD_BACK}" loading="lazy" draggable="false" />`
+      d.title = 'Opponent hand card'
+      handEl.appendChild(d)
+    }
+    if (countEl) countEl.textContent = `${count} cards (opponent)`
+    return
+  }
+
   me.hand?.forEach(card=>{
     const d = div('hcard')
     d.draggable = true
@@ -1398,7 +1424,7 @@ function gMulligan() {
   sysMsg(`${S.myName} took a mulligan`); toast(`Mulligan! Drew 7`,'warn')
 }
 
-function gScry(n) {
+function gScry(n=1) {
   const p=me(); if(!p||!p.library?.length) return
   S.modal = { type:'libtop', count:n, label:`Scry ${n}`, hint:'Reorder, or send cards to the bottom/graveyard/exile. Click Done when finished.' }
   R()
@@ -1410,7 +1436,7 @@ function gSurveil(n) {
   R()
 }
 
-function openLibraryTopModal(n=5) {
+function openLibraryTopModal(n=1) {
   const p=me(); if(!p) return
   if (!p.library?.length) return toast('Library empty!','warn')
   S.modal = { type:'libtop', count:Math.min(n,p.library.length), label:'View Top Cards', hint:'Look at, reorder, or move the top cards of your library.' }
@@ -1418,6 +1444,19 @@ function openLibraryTopModal(n=5) {
 }
 
 function gMoveCard(cardId, fromZone, toZone, tapped=false) {
+  // Tokens leaving the battlefield cease to exist (MTG rule 111.7)
+  if (fromZone === 'battlefield') {
+    const p = S.gs?.players?.[S.playerId]
+    const card = p?.battlefield?.find(c => c.id === cardId)
+    if (card?.token && toZone !== 'battlefield') {
+      // Just remove from battlefield, don't send anywhere
+      p.battlefield = p.battlefield.filter(c => c.id !== cardId)
+      send({type:'PLAYER_UPDATE', playerId:S.playerId, patch:{ battlefield:[...p.battlefield] }})
+      toast(card.name + ' token ceases to exist','good')
+      sysMsg(S.myName + ': ' + card.name + ' token ceased to exist')
+      return
+    }
+  }
   send({type:'MOVE_CARD',playerId:S.playerId,cardId,fromZone,toZone,tapped})
 }
 
@@ -1469,9 +1508,7 @@ function showLibMenu() {
     {label:'Surveil 2', action:()=>gSurveil(2)},
     {label:'Surveil 3', action:()=>gSurveil(3)},
     {sep:true},
-    {label:'View Top 3',  action:()=>openLibraryTopModal(3)},
-    {label:'View Top 5',  action:()=>openLibraryTopModal(5)},
-    {label:'View Top 10', action:()=>openLibraryTopModal(10)},
+    {label:'View Top Cards…', action:()=>openLibraryTopModal(1)},
     {sep:true},
     {label:'View / Search Whole Library', action:()=>openZoneModal('Library', p.library||[], 'library', false, true)},
     {sep:true},
@@ -1642,15 +1679,20 @@ function buildModal() {
     const p = me()
     const n = m.count
     const top = (p.library||[]).slice(0, n)
-    bg.innerHTML=`<div class="modal" style="max-width:520px;width:95vw">
-      <div class="modal-hdr"><h3>${esc(m.label)} — Top ${n} of Library</h3><button class="x-btn" id="lt-close">✕</button></div>
+    bg.innerHTML=`<div class="modal" style="max-width:560px;width:95vw">
+      <div class="modal-hdr"><h3>${esc(m.label)}</h3><button class="x-btn" id="lt-close">✕</button></div>
       <div class="modal-body">
         <div class="libtop-hint">${esc(m.hint||'')}</div>
-        <div class="libtop-grid" id="libtop-grid"></div>
-        <div class="libtop-actions">
-          <button class="zca-btn" id="lt-shuffle-rest">Shuffle library</button>
+        <div class="libtop-controls">
+          <label class="lt-lbl">Cards to show:</label>
+          <button class="zca-btn" id="lt-dec">−</button>
+          <input type="number" id="lt-count" value="${n}" min="1" max="${p.library?.length||100}" class="lt-count-in" />
+          <button class="zca-btn" id="lt-inc">+</button>
+          <span class="lt-of">of ${p.library?.length||0}</span>
+          <button class="zca-btn" id="lt-shuffle-rest" style="margin-left:auto">Shuffle library</button>
           <button class="ma-btn gold" id="lt-done">Done</button>
         </div>
+        <div class="libtop-grid" id="libtop-grid"></div>
       </div>
     </div>`
     bg.querySelector('#lt-close').addEventListener('click',()=>{S.modal=null;R()})
@@ -1658,6 +1700,17 @@ function buildModal() {
     bg.querySelector('#lt-shuffle-rest').addEventListener('click',()=>{
       send({type:'SHUFFLE',playerId:S.playerId}); toast('Library shuffled','good'); S.modal=null; R()
     })
+    // Number controls
+    const countIn = bg.querySelector('#lt-count')
+    const updateCount = () => {
+      const newN = Math.max(1, Math.min(p.library?.length||1, parseInt(countIn.value)||1))
+      countIn.value = newN
+      S.modal.count = newN
+      renderGrid()
+    }
+    bg.querySelector('#lt-dec').addEventListener('click',()=>{ countIn.value=Math.max(1,parseInt(countIn.value||1)-1); updateCount() })
+    bg.querySelector('#lt-inc').addEventListener('click',()=>{ countIn.value=parseInt(countIn.value||1)+1; updateCount() })
+    countIn.addEventListener('change', updateCount)
 
     const grid = bg.querySelector('#libtop-grid')
     const renderGrid = () => {
