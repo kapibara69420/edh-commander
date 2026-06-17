@@ -127,16 +127,6 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .turn-pill b{color:var(--gold2)}
 
 /* Stack bar */
-.g-stack{background:#0d0900;border-bottom:2px solid #3a2004;display:flex;align-items:center;gap:.35rem;padding:.28rem .7rem;min-height:32px;overflow-x:auto;flex-shrink:0}
-.stack-lbl{font-size:.6rem;color:#b87018;text-transform:uppercase;letter-spacing:.1em;flex-shrink:0;opacity:.7}
-.stack-empty{font-size:.7rem;color:var(--text4);font-style:italic}
-.si{background:#1a1000;border:1px solid #3a2004;border-radius:var(--radius2);padding:.18rem .5rem;font-size:.72rem;color:#e8aa38;white-space:nowrap;cursor:pointer;transition:all .12s;display:flex;align-items:center;gap:.28rem;flex-shrink:0}
-.si.top{border-color:#c87820}
-.si:hover{border-color:var(--gold3);color:var(--gold3)}
-.si-who{font-size:.6rem;color:var(--text3)}
-.sarrow{color:#3a2004;font-size:.62rem;flex-shrink:0}
-.stack-btns{display:flex;gap:.28rem;margin-left:auto;flex-shrink:0}
-.stack-btns .tb{font-size:.68rem;padding:.18rem .46rem}
 
 /* Body layout */
 .g-body{display:flex;flex:1;overflow:hidden;min-height:0}
@@ -398,3 +388,14 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .toast.good{border-color:var(--green);color:var(--green2)}
 .toast.gold{border-color:var(--gold);color:var(--gold2)}
 @keyframes tin{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:none}}
+
+/* ── Dice dropdown ── */
+.dice-wrap{position:relative;display:inline-block}
+.dice-menu{position:absolute;top:calc(100% + 4px);right:0;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius2);padding:.3rem;display:none;z-index:200;min-width:80px;box-shadow:var(--shadow)}
+.dice-menu.show{display:flex;flex-direction:column;gap:.2rem}
+.dice-opt{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius3);color:var(--gold2);font-size:.82rem;font-weight:700;padding:.3rem .6rem;cursor:pointer;text-align:center;transition:all .12s}
+.dice-opt:hover{background:var(--gold);color:#160f00;border-color:var(--gold)}
+
+/* ── Library pile hint ── */
+.lib-pile span{font-size:.75rem}
+.lib-pile::after{content:'click=draw';display:block;font-size:.48rem;color:var(--text4);text-align:center;margin-top:2px}

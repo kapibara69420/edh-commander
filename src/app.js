@@ -728,7 +728,18 @@ function buildGame() {
       <button class="tb${activeId===S.playerId?' primary':''}" id="g-nextturn">Next Turn ›</button>
       <button class="tb" id="g-untap">Untap All</button>
       <button class="tb" id="g-chat">💬</button>
-      <button class="tb" id="g-dice">🎲 d20</button>
+      <div class="dice-wrap" id="dice-wrap">
+        <button class="tb" id="g-dice">🎲 Roll Dice ▾</button>
+        <div class="dice-menu" id="dice-menu">
+          <button class="dice-opt" data-sides="4">d4</button>
+          <button class="dice-opt" data-sides="6">d6</button>
+          <button class="dice-opt" data-sides="8">d8</button>
+          <button class="dice-opt" data-sides="10">d10</button>
+          <button class="dice-opt" data-sides="12">d12</button>
+          <button class="dice-opt" data-sides="20">d20</button>
+          <button class="dice-opt" data-sides="100">d100</button>
+        </div>
+      </div>
       <button class="tb" id="g-coin">🪙 Coin</button>
       <button class="tb red" id="g-quit">Quit</button>
     </div>
@@ -748,8 +759,6 @@ function buildGame() {
     </div>
   </div>
 
-  <!-- ── STACK BAR ── -->
-  <div class="g-stack" id="g-stack"></div>
 
   <!-- ── BODY ── -->
   <div class="g-body${manyOpps?' many-opps':''}">
@@ -830,7 +839,20 @@ function buildGame() {
   el.querySelector('#g-nextturn').addEventListener('click', ()=>gNextTurn())
   el.querySelector('#g-untap').addEventListener('click', ()=>gUntapAll())
   el.querySelector('#g-chat').addEventListener('click', ()=>{ S.chatOpen=!S.chatOpen; R() })
-  el.querySelector('#g-dice').addEventListener('click', ()=>{ const r=Math.floor(Math.random()*20)+1; sysMsg(`🎲 ${S.myName} rolled d20: ${r}`); toast(`d20: ${r}`,'gold') })
+  el.querySelector('#g-dice').addEventListener('click', (e) => {
+    e.stopPropagation()
+    const menu = el.querySelector('#dice-menu')
+    menu.classList.toggle('show')
+  })
+  el.querySelector('#dice-menu').addEventListener('click', e => {
+    const btn = e.target.closest('.dice-opt'); if (!btn) return
+    const sides = +btn.dataset.sides
+    const r = Math.floor(Math.random()*sides)+1
+    sysMsg(`🎲 ${S.myName} rolled d${sides}: ${r}`)
+    toast(`d${sides}: ${r}`,'gold')
+    el.querySelector('#dice-menu').classList.remove('show')
+  })
+  document.addEventListener('click', () => el.querySelector('#dice-menu')?.classList.remove('show'))
   el.querySelector('#g-coin').addEventListener('click', ()=>{ const r=Math.random()<.5?'Heads':'Tails'; sysMsg(`🪙 ${S.myName}: ${r}`); toast(r,'gold') })
   el.querySelector('#g-quit').addEventListener('click', ()=>{ if(confirm('Leave game?')){ if(_channel) getSupabase()?.removeChannel(_channel); _channel=null; S.gs=null;S.screen='lobby';R()} })
 
@@ -958,6 +980,19 @@ function buildGame() {
   restoreSize('--opps-w','edh_opps_w')
   restoreSize('--mz-w','edh_mz_w')
 
+  // Track hovered battlefield card for T key
+  let _hoveredCard = null
+  el.addEventListener('mouseover', ev => {
+    const cardEl = ev.target.closest('.bf-card')
+    if (cardEl) {
+      const id = parseInt(cardEl.dataset.id)
+      const p = S.gs?.players?.[S.playerId]
+      _hoveredCard = p?.battlefield?.find(c => c.id === id) || null
+    } else {
+      _hoveredCard = null
+    }
+  })
+
   // Keyboard shortcuts
   document.onkeydown = ev => {
     if (ev.target.tagName==='INPUT'||ev.target.tagName==='TEXTAREA') return
@@ -965,6 +1000,10 @@ function buildGame() {
     if (ev.key==='d'||ev.key==='D') gDraw(1)
     if (ev.key==='n'||ev.key==='N') gNextTurn()
     if (ev.key==='u'||ev.key==='U') gUntapAll()
+    if ((ev.key==='t'||ev.key==='T') && _hoveredCard) {
+      gTapCard(_hoveredCard,'battlefield')
+      ev.preventDefault()
+    }
   }
 
   // Determine whose board we're viewing
@@ -976,7 +1015,6 @@ function buildGame() {
   renderHand(el, isViewingOpp ? viewedPlayer : me, isViewingOpp)
   renderOpponents(el, opponents, gs)
   renderStats(el, me, opponents)
-  renderStack(el, gs)
 
   // Show viewing banner when on opponent's board
   if (isViewingOpp && viewedPlayer) {
@@ -1020,28 +1058,47 @@ function renderBf(el, me, readOnly=false) {
     el2.style.width  = cardW + 'px'
     el2.style.height = cardH + 'px'
     if (!readOnly) {
-      // Drag to reposition within battlefield
       el2.addEventListener('mousedown', e => {
         if (e.button !== 0) return
-        e.stopPropagation()
-        const startX = e.clientX - card.bfX
-        const startY = e.clientY - card.bfY
+        e.stopPropagation(); e.preventDefault()
+        const startMouseX = e.clientX, startMouseY = e.clientY
+        const startBfX = card.bfX, startBfY = card.bfY
         let moved = false
+        // ghost overlay so pointer events don't hit children
+        el2.style.opacity = '0.7'
         const onMove = mv => {
           moved = true
-          card.bfX = Math.max(0, mv.clientX - startX)
-          card.bfY = Math.max(0, mv.clientY - startY)
+          const dx = mv.clientX - startMouseX
+          const dy = mv.clientY - startMouseY
+          card.bfX = Math.max(0, startBfX + dx)
+          card.bfY = Math.max(0, startBfY + dy)
           el2.style.left = card.bfX + 'px'
           el2.style.top  = card.bfY + 'px'
+          // Highlight drop zones when hovering over them
+          const target = document.elementFromPoint(mv.clientX, mv.clientY)
+          document.querySelectorAll('.g-minizone,.g-hand-wrap').forEach(z => z.classList.remove('drag-over'))
+          const zone = target?.closest('.g-minizone,.g-hand-wrap')
+          if (zone) zone.classList.add('drag-over')
         }
-        const onUp = () => {
+        const onUp = ev => {
           document.removeEventListener('mousemove', onMove)
           document.removeEventListener('mouseup', onUp)
-          if (moved) {
-            // Sync position to peers
-            send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfX', value:card.bfX })
-            send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfY', value:card.bfY })
-          }
+          el2.style.opacity = ''
+          document.querySelectorAll('.g-minizone,.g-hand-wrap').forEach(z => z.classList.remove('drag-over'))
+          if (!moved) return
+          // Check if dropped on a zone element
+          const target = document.elementFromPoint(ev.clientX, ev.clientY)
+          const gyZone   = target?.closest('#g-gy-zone')
+          const exZone   = target?.closest('#g-exile-zone')
+          const cmdZone  = target?.closest('#g-cmd-zone')
+          const handZone = target?.closest('.g-hand-wrap')
+          if (gyZone)   { gMoveCard(card.id,'battlefield','graveyard'); sysMsg(S.myName+': '+card.name+'→GY'); return }
+          if (exZone)   { gMoveCard(card.id,'battlefield','exile');     sysMsg(S.myName+': '+card.name+'→exile'); return }
+          if (cmdZone)  { gMoveCard(card.id,'battlefield','commandZone'); return }
+          if (handZone) { gMoveCard(card.id,'battlefield','hand');      sysMsg(S.myName+': '+card.name+'→hand'); return }
+          // Stayed on battlefield — sync new position
+          send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfX', value:card.bfX })
+          send({ type:'CARD_FIELD', playerId:S.playerId, cardId:card.id, zone:'battlefield', field:'bfY', value:card.bfY })
         }
         document.addEventListener('mousemove', onMove)
         document.addEventListener('mouseup', onUp)
@@ -1138,14 +1195,19 @@ function renderMiniZones(el, me, readOnly=false) {
     libEl.innerHTML=''
     const pile = div('ez-card lib-pile')
     pile.innerHTML=`<span>${me.libraryCount||me.library?.length||0}</span>`
-    pile.onclick = ()=>showLibMenu()
+    pile.addEventListener('click', e => {
+      if (e.shiftKey || e.ctrlKey || e.altKey) { showLibMenu(); return }
+      // Single click = draw 1 card
+      gDraw(1)
+    })
+    pile.addEventListener('contextmenu', e => { e.preventDefault(); showLibMenu() })
     libEl.appendChild(pile)
   }
 }
 
 // ── Hand ──
 // MTG card back image (official Scryfall asset)
-const CARD_BACK = 'https://backs.scryfall.io/large/back.jpg'
+const CARD_BACK = '/card-back.svg'
 
 function renderHand(el, me, readOnly=false) {
   const handEl=el.querySelector('#g-hand'), countEl=el.querySelector('#hand-n')
@@ -1466,8 +1528,7 @@ function gPlayCard(card) {
     gMoveCard(card.id,'hand','battlefield'); sysMsg(`${S.myName} played ${card.name}`); toast(`Played ${card.name}`,'good')
   } else {
     gMoveCard(card.id,'hand','battlefield')
-    send({type:'STACK_PUSH',playerId:S.playerId,name:card.name,card})
-    sysMsg(`${S.myName} cast ${card.name}`); toast(`Cast: ${card.name} — on stack`,'gold')
+    sysMsg(`${S.myName} cast ${card.name}`); toast(`Cast: ${card.name}`,'gold')
   }
 }
 
@@ -1488,7 +1549,6 @@ function gCreateToken(name, type_line, oracle_text, pt='') {
 
 function gCastCommander(card) {
   gMoveCard(card.id,'commandZone','battlefield')
-  send({type:'STACK_PUSH',playerId:S.playerId,name:card.name+' (Commander)',card})
   sysMsg(`${S.myName} cast commander ${card.name}`); toast(`Cast commander: ${card.name}`,'gold')
 }
 
@@ -1711,6 +1771,7 @@ function buildModal() {
     bg.querySelector('#lt-dec').addEventListener('click',()=>{ countIn.value=Math.max(1,parseInt(countIn.value||1)-1); updateCount() })
     bg.querySelector('#lt-inc').addEventListener('click',()=>{ countIn.value=parseInt(countIn.value||1)+1; updateCount() })
     countIn.addEventListener('change', updateCount)
+    countIn.addEventListener('input', updateCount)  // live update as you type
 
     const grid = bg.querySelector('#libtop-grid')
     const renderGrid = () => {
@@ -1847,13 +1908,13 @@ function getCardActions(card, zone) {
   } else if (zone==='battlefield') {
     add(card.tapped?'↺ Untap':'↷ Tap',()=>gTapCard(card,'battlefield'))
     if ((card.type_line||'').toLowerCase().includes('creature')) {
-      add('⚔ Declare as attacker',()=>{ gTapCard(card,'battlefield'); send({type:'STACK_PUSH',playerId:S.playerId,name:`${card.name} attacks`,card:null}); sysMsg(`${S.myName} attacks with ${card.name}`) })
+      add('⚔ Declare as attacker',()=>{ gTapCard(card,'battlefield'); sysMsg(`${S.myName} attacks with ${card.name}`) })
     }
     add('🔵 Manage counters…',()=>openCountersModal(card,zone),{gold:true,keepOpen:true})
     if ((card.type_line||'').toLowerCase().includes('planeswalker')) {
       add('+1 Loyalty',()=>{ if(!card.counters)card.counters={}; card.counters.loyalty=(card.counters.loyalty||0)+1; send({type:'CARD_COUNTERS',playerId:S.playerId,cardId:card.id,zone:'battlefield',counterKey:'loyalty',value:card.counters.loyalty}) })
     }
-    add('⚡ Activate ability',()=>{ const ab=prompt('Ability:'); if(ab){send({type:'STACK_PUSH',playerId:S.playerId,name:`${card.name}: ${ab}`,card:null});sysMsg(`${S.myName} activates ${card.name}: ${ab}`)} })
+    add('⚡ Activate ability',()=>{ const ab=prompt('Ability:'); if(ab){ sysMsg(`${S.myName} activates ${card.name}: ${ab}`) } })
     add('☠ Destroy → GY',()=>{ gMoveCard(card.id,'battlefield','graveyard'); sysMsg(`${S.myName}: ${card.name} → GY`) })
     add('✦ Exile',()=>{ gMoveCard(card.id,'battlefield','exile'); sysMsg(`${S.myName}: ${card.name} → exile`) },{red:true})
     add('↩ Bounce to hand',()=>{ gMoveCard(card.id,'battlefield','hand'); sysMsg(`${S.myName}: ${card.name} → hand`) })
