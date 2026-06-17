@@ -11,7 +11,7 @@ import { loadDecks, saveDeck, deleteDeck, exportDeckFile, importDeckFile,
 // STATE
 // ─────────────────────────────────────────────
 const S = {
-  screen: 'lobby',        // lobby | deckbuilder | game
+  screen: 'lobby',        // lobby | deckbuilder | waiting | game
   playerId: null,
   roomId: null,
   ws: null,
@@ -59,6 +59,7 @@ function R() {
   $root.innerHTML = ''
   if (S.screen === 'lobby')       $root.appendChild(buildLobby())
   if (S.screen === 'deckbuilder') $root.appendChild(buildDeckBuilder())
+  if (S.screen === 'waiting')     $root.appendChild(buildWaiting())
   if (S.screen === 'game')        { $root.appendChild(buildGame()); $root.appendChild(buildChat()) }
   $root.appendChild(buildCtx())
   $root.appendChild(buildToasts())
@@ -516,7 +517,7 @@ function startGame() {
   S.cardIdCounter = nextId
 
   S.gs = makeLocalState(lib, commandZone)
-  S.screen = 'game'
+  S.screen = 'waiting'
   R()
 
   prefetchDeck([...(S.myDeck.commanders||[]), ...S.myDeck.cards], (done,total) => {
@@ -604,8 +605,28 @@ function handlePeerMsg(msg) {
       library: msg.deckList || [],
       libraryCount: typeof snap.libraryCount === 'number' ? snap.libraryCount : (msg.deckList||[]).length,
       connected: true,
+      ready: snap.ready || false,
     }
-    sysMsg((msg.name||'Someone')+' joined the game')
+    if (S.gs.started) {
+      sysMsg((msg.name||'Someone')+' reconnected')
+    } else {
+      sysMsg((msg.name||'Someone')+' joined the room')
+    }
+    R()
+    return
+  }
+
+  if (msg.type === 'GAME_START') {
+    // Peer triggered game start — switch us to game screen
+    applyLocal(msg)
+    if (S.screen === 'waiting') {
+      S.screen = 'game'
+      const startingPlayer = S.gs?.players?.[S.gs?.playerOrder?.[msg.startingIdx]]
+      toast(`Game started! Starting player: ${startingPlayer?.name||'?'}`, 'gold')
+      sysMsg(`Game started! Starting player: ${startingPlayer?.name||'?'}`)
+      // Draw opening hand
+      setTimeout(() => send({type:'DRAW', playerId:S.playerId, count:7}), 300)
+    }
     R()
     return
   }
@@ -623,8 +644,16 @@ function handlePeerMsg(msg) {
         life:me.life, cmdDmg:me.cmdDmg, mana:me.mana, counters:me.counters,
         hand:me.hand, battlefield:me.battlefield, graveyard:me.graveyard,
         exile:me.exile, commandZone:me.commandZone, libraryCount:me.libraryCount,
+        ready:me.ready||false,
       }
     })
+    return
+  }
+
+  if (msg.type === 'PLAYER_READY') {
+    // Update the peer's ready status
+    const rp = S.gs?.players?.[msg.playerId]
+    if (rp) { rp.ready = true; R() }
     return
   }
 
@@ -715,7 +744,17 @@ function applyLocal(msg) {
       break
     }
     case 'STACK_COUNTER': gs.stack=gs.stack.filter(s=>s.id!==msg.stackId); break
+    case 'GAME_START': {
+      // Pick random starting player from all connected players
+      gs.activePlayerIdx = msg.startingIdx !== undefined ? msg.startingIdx : 0
+      gs.started = true
+      gs.phase = 'Untap'
+      gs.turn = 1
+      break
+    }
     case 'NEXT_TURN': {
+      // Only active player may advance the turn
+      if (msg.playerId !== gs.playerOrder[gs.activePlayerIdx]) break
       gs.activePlayerIdx=(gs.activePlayerIdx+1)%gs.playerOrder.length
       if(gs.activePlayerIdx===0) gs.turn++
       gs.phase='Untap'
@@ -724,21 +763,141 @@ function applyLocal(msg) {
       if(active) active.mana={W:0,U:0,B:0,R:0,G:0,C:0}
       break
     }
+    case 'PLAYER_READY': {
+      const rp = gs.players[msg.playerId]
+      if (rp) rp.ready = true
+      break
+    }
     case 'SET_PHASE': gs.phase=msg.phase; break
     case 'CHAT': { if(!gs.chat)gs.chat=[]; gs.chat.push({id:Date.now(),playerId:msg.playerId,playerName:msg.playerName,text:msg.text,isSystem:!!msg.isSystem}); break }
   }
   // If this action is for another player (peer action), do a gentle update
   // that doesn't destroy our open modal/context menus
   if (msg.playerId && msg.playerId !== S.playerId) {
-    gentleR()
+    if (S.screen === 'waiting') R()  // waiting room always needs full update
+    else gentleR()
   } else {
     R()
   }
 }
 
 // ═══════════════════════════════════════════════════════════
-// GAME SCREEN
+// WAITING ROOM
 // ═══════════════════════════════════════════════════════════
+function buildWaiting() {
+  const gs = S.gs
+  const players = gs ? gs.playerOrder.map(id => gs.players[id]).filter(Boolean) : []
+  const me = gs?.players?.[S.playerId]
+  const allReady = players.length >= 1 && players.every(p => p.ready)
+
+  const el = div('screen-waiting screen active')
+  el.innerHTML = `
+    <div class="wait-logo">⚔ EDH Commander Online</div>
+    <div class="wait-room">Room: <b>${esc(S.roomId)}</b>
+      <span class="wait-link" id="wait-copy-link" title="Click to copy link">📋 Copy invite link</span>
+    </div>
+    <div class="wait-subtitle">Waiting for players to ready up…</div>
+
+    <div class="wait-players" id="wait-players">
+      ${players.map(p => `
+        <div class="wait-player">
+          <div class="wait-player-header">
+            <div class="wp-dot" style="background:${p.color}"></div>
+            <span class="wp-name" style="color:${p.color}">${esc(p.name)}</span>
+            <span class="wp-status ${p.ready?'ready':'waiting'}">${p.ready?'✓ Ready':'waiting…'}</span>
+          </div>
+          <div class="wp-commanders">
+            ${(p.commandZone||[]).map(c => `
+              <div class="wp-cmd">
+                ${c.image_uri ? `<img src="${c.image_uri}" class="wp-cmd-img" />` : ''}
+                <span class="wp-cmd-name">${esc(c.name)}</span>
+              </div>
+            `).join('') || '<span class="wp-no-cmd">No commander set</span>'}
+          </div>
+        </div>
+      `).join('')}
+      ${players.length === 0 ? '<div class="empty-hint">Connecting…</div>' : ''}
+    </div>
+
+    <div class="wait-actions">
+      <button class="big-btn${me?.ready?' ready-btn':''}" id="wait-ready" style="max-width:280px">
+        ${me?.ready ? '✓ Ready!' : 'Press Ready'}
+      </button>
+      ${allReady ? `<button class="big-btn start-btn" id="wait-start" style="max-width:280px;background:var(--green2);color:#0a1a0a;margin-top:.5rem">▶ Start Game</button>` : ''}
+    </div>
+
+    <div class="wait-hint">
+      ${players.length === 1 ? 'Share the room code or invite link with your friends.' : ''}
+      ${allReady ? '🟢 All players ready! Click "Start Game" to begin.' : `${players.filter(p=>p.ready).length}/${players.length} players ready`}
+    </div>
+
+    <button class="ghost-btn" id="wait-leave" style="margin-top:1rem">← Leave Room</button>
+  `
+
+  // Prefetch commander art while waiting
+  players.forEach(p => {
+    (p.commandZone||[]).forEach(card => {
+      if (!card.image_uri) fetchCard(card.name).then(d => {
+        if (d?.image_uri) { card.image_uri = d.image_uri; R() }
+      })
+    })
+  })
+
+  el.querySelector('#wait-copy-link')?.addEventListener('click', () => {
+    const url = `${location.origin}${location.pathname}?room=${S.roomId}`
+    navigator.clipboard?.writeText(url)
+    toast('Invite link copied!','good')
+  })
+
+  el.querySelector('#wait-ready').addEventListener('click', () => gReady())
+
+  el.querySelector('#wait-start')?.addEventListener('click', () => gStartGame())
+
+  el.querySelector('#wait-leave').addEventListener('click', () => {
+    if (_channel) getSupabase()?.removeChannel(_channel); _channel = null
+    S.gs = null; S.screen = 'lobby'; R()
+  })
+
+  return el
+}
+
+function gReady() {
+  const me = S.gs?.players?.[S.playerId]
+  if (!me) return
+  me.ready = true
+  send({ type:'PLAYER_READY', playerId:S.playerId })
+  toast('You are ready!','good')
+  R()
+}
+
+function gStartGame() {
+  const gs = S.gs; if (!gs) return
+  const players = gs.playerOrder.map(id => gs.players[id]).filter(Boolean)
+  if (!players.every(p => p.ready)) { toast('Not all players are ready yet','warn'); return }
+
+  // Pick a random starting player
+  const startingIdx = Math.floor(Math.random() * players.length)
+  const startingPlayer = players[startingIdx]
+
+  send({ type:'GAME_START', playerId:S.playerId, startingIdx })
+  sysMsg(`🎲 Starting player: ${startingPlayer.name}!`)
+  toast(`Starting player: ${startingPlayer.name}!`,'gold')
+
+  gs.started = true
+  gs.activePlayerIdx = startingIdx
+  gs.turn = 1
+  gs.phase = 'Untap'
+
+  S.screen = 'game'
+  // Draw 7
+  setTimeout(() => {
+    const p = S.gs?.players?.[S.playerId]; if (!p) return
+    send({ type:'DRAW', playerId:S.playerId, count:7 })
+  }, 300)
+  R()
+}
+
+
 function buildGame() {
   const gs=S.gs, me=gs?.players?.[S.playerId]
   if (!gs||!me) return div('','<div style="padding:2rem;color:var(--text3)">Connecting…</div>')
@@ -760,7 +919,7 @@ function buildGame() {
     <div class="g-topright">
       <div class="turn-pill">Turn <b>${gs.turn}</b> · <b style="color:${activePlayer?.color||'var(--gold2)'}">${esc(activePlayer?.name||'?')}</b></div>
       <button class="tb primary" id="g-draw">Draw</button>
-      <button class="tb${activeId===S.playerId?' primary':''}" id="g-nextturn">Next Turn ›</button>
+      <button class="tb${activeId===S.playerId?' primary':' disabled-btn'}" id="g-nextturn" title="${activeId===S.playerId?'End your turn (Space)':'Wait for your turn'}">Next Turn ›</button>
       <button class="tb" id="g-untap">Untap All</button>
       <button class="tb" id="g-chat">💬</button>
       <div class="dice-wrap" id="dice-wrap">
@@ -1034,6 +1193,7 @@ function buildGame() {
     if (ev.key==='Escape') { S.modal=null; hideCtx(); R() }
     if (ev.key==='d'||ev.key==='D') gDraw(1)
     if (ev.key==='n'||ev.key==='N') gNextTurn()
+    if (ev.key===' ') { ev.preventDefault(); gNextTurn() }
     if (ev.key==='u'||ev.key==='U') gUntapAll()
     if ((ev.key==='t'||ev.key==='T') && _hoveredCard) {
       gTapCard(_hoveredCard,'battlefield')
@@ -1498,9 +1658,15 @@ function gDraw(n=1) {
 
 function gNextTurn() {
   const gs=S.gs; if(!gs) return
+  const activeId = gs.playerOrder[gs.activePlayerIdx]
+  if (activeId !== S.playerId) {
+    toast("It's not your turn",'warn')
+    return
+  }
   const nextIdx=(gs.activePlayerIdx+1)%gs.playerOrder.length
   const nextName=gs.players[gs.playerOrder[nextIdx]]?.name||'?'
-  send({type:'NEXT_TURN'}); sysMsg(`Turn ${gs.turn}: ${nextName}'s turn`)
+  send({type:'NEXT_TURN',playerId:S.playerId})
+  sysMsg(`${S.myName} ended their turn. Turn ${gs.turn}: ${nextName}'s turn`)
 }
 
 function gUntapAll() {
