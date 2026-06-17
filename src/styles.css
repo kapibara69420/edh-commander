@@ -397,5 +397,4 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .dice-opt:hover{background:var(--gold);color:#160f00;border-color:var(--gold)}
 
 /* ── Library pile hint ── */
-.lib-pile span{font-size:.75rem}
-.lib-pile::after{content:'click=draw';display:block;font-size:.48rem;color:var(--text4);text-align:center;margin-top:2px}
+.lib-pile span{font-size:.85rem;font-weight:800;color:var(--gold3)}

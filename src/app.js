@@ -65,6 +65,35 @@ function R() {
   if (S.modal) $root.appendChild(buildModal())
 }
 
+// gentleR: used when a PEER action arrives — updates opponent panels and
+// game state visuals WITHOUT destroying our open modal, context menu, or
+// card detail popup. Only rebuilds the parts that show other players.
+function gentleR() {
+  if (S.screen !== 'game' || !S.gs) { R(); return }
+  // Re-render only opponent column and chat — leave my battlefield/modal alone
+  try {
+    const gs = S.gs
+    const me = gs.players[S.playerId]
+    const opponents = gs.playerOrder.filter(id=>id!==S.playerId).map(id=>gs.players[id]).filter(Boolean)
+    const gameEl = document.querySelector('.game-screen')
+    if (!gameEl) { R(); return }
+    // Update opponent column
+    const oppsEl = gameEl.querySelector('#g-opps')
+    if (oppsEl) renderOpponents(gameEl, opponents, gs)
+    // Update chat
+    refreshChat()
+    // Update turn pill and phase bar (non-destructive text updates)
+    const activeId = gs.playerOrder[gs.activePlayerIdx]
+    const ap = gs.players[activeId]
+    const turnEl = gameEl.querySelector('.turn-pill')
+    if (turnEl) turnEl.innerHTML = `Turn <b>${gs.turn}</b> · <b style="color:${ap?.color||'var(--gold2)'}">${esc(ap?.name||'?')}</b>`
+    gameEl.querySelectorAll('.ph').forEach(b => b.classList.toggle('on', b.dataset.ph === gs.phase))
+  } catch(e) {
+    // Fallback to full rerender if partial update fails
+    R()
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 // LOBBY
 // ═══════════════════════════════════════════════════════════
@@ -698,7 +727,13 @@ function applyLocal(msg) {
     case 'SET_PHASE': gs.phase=msg.phase; break
     case 'CHAT': { if(!gs.chat)gs.chat=[]; gs.chat.push({id:Date.now(),playerId:msg.playerId,playerName:msg.playerName,text:msg.text,isSystem:!!msg.isSystem}); break }
   }
-  R()
+  // If this action is for another player (peer action), do a gentle update
+  // that doesn't destroy our open modal/context menus
+  if (msg.playerId && msg.playerId !== S.playerId) {
+    gentleR()
+  } else {
+    R()
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1207,7 +1242,7 @@ function renderMiniZones(el, me, readOnly=false) {
 
 // ── Hand ──
 // MTG card back image (official Scryfall asset)
-const CARD_BACK = '/card-back.png'
+const CARD_BACK = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 140'><rect width='100' height='140' rx='6' fill='%231a1a2e'/><rect x='4' y='4' width='92' height='132' rx='5' fill='none' stroke='%234a3080' stroke-width='1.5'/><rect x='8' y='8' width='84' height='124' rx='4' fill='%2316213e'/><circle cx='50' cy='70' r='30' fill='none' stroke='%236a3090' stroke-width='1'/><circle cx='50' cy='70' r='22' fill='none' stroke='%236a3090' stroke-width='.8'/><polygon points='50,45 72,62 63,87 37,87 28,62' fill='none' stroke='%238844bb' stroke-width='1.2'/><circle cx='50' cy='70' r='6' fill='%236a3090' opacity='.8'/><text x='50' y='20' text-anchor='middle' fill='%238844bb' font-size='7' font-family='serif' opacity='.7'>MAGIC</text></svg>`
 
 function renderHand(el, me, readOnly=false) {
   const handEl=el.querySelector('#g-hand'), countEl=el.querySelector('#hand-n')
@@ -1776,7 +1811,7 @@ function buildModal() {
     const grid = bg.querySelector('#libtop-grid')
     const renderGrid = () => {
       grid.innerHTML=''
-      const cards = (p.library||[]).slice(0, n)
+      const cards = (p.library||[]).slice(0, S.modal?.count || n)
       if (!cards.length) { grid.innerHTML='<div class="empty-hint">Library is empty.</div>'; return }
       cards.forEach((card,idx) => {
         const wrap=div('zc-wrap')
