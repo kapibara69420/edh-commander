@@ -1207,7 +1207,7 @@ function renderMiniZones(el, me, readOnly=false) {
 
 // ── Hand ──
 // MTG card back image (official Scryfall asset)
-const CARD_BACK = '/card-back.svg'
+const CARD_BACK = '/card-back.png'
 
 function renderHand(el, me, readOnly=false) {
   const handEl=el.querySelector('#g-hand'), countEl=el.querySelector('#hand-n')
