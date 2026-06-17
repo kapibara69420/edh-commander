@@ -434,3 +434,8 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 /* ── Disabled turn button ── */
 .disabled-btn{opacity:.38!important;cursor:not-allowed!important;border-color:var(--border)!important;color:var(--text4)!important}
 .disabled-btn:hover{background:transparent!important;color:var(--text4)!important}
+
+/* ── Conjure modal destination buttons ── */
+.conj-dest{transition:all .12s}
+.conj-dest.on{background:var(--purple);border-color:var(--purple2);color:#fff}
+.conj-dest:hover{border-color:var(--purple2);color:var(--purple2)}

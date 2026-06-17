@@ -617,16 +617,18 @@ function handlePeerMsg(msg) {
   }
 
   if (msg.type === 'GAME_START') {
-    // Peer triggered game start — switch us to game screen
-    applyLocal(msg)
-    if (S.screen === 'waiting') {
-      S.screen = 'game'
-      const startingPlayer = S.gs?.players?.[S.gs?.playerOrder?.[msg.startingIdx]]
-      toast(`Game started! Starting player: ${startingPlayer?.name||'?'}`, 'gold')
-      sysMsg(`Game started! Starting player: ${startingPlayer?.name||'?'}`)
-      // Draw opening hand
-      setTimeout(() => send({type:'DRAW', playerId:S.playerId, count:7}), 300)
-    }
+    if (S.screen !== 'waiting') return  // already in game
+    // Apply the exact startingIdx the creator rolled — no re-roll
+    const gs = S.gs; if (!gs) return
+    gs.started = true
+    gs.activePlayerIdx = msg.startingIdx !== undefined ? msg.startingIdx : 0
+    gs.turn = 1
+    gs.phase = 'Untap'
+    const startingPlayer = gs.players[gs.playerOrder[gs.activePlayerIdx]]
+    S.screen = 'game'
+    toast(`Game started! Starting player: ${startingPlayer?.name||'?'}`, 'gold')
+    sysMsg(`Game started! Starting player: ${startingPlayer?.name||'?'}`)
+    setTimeout(() => send({type:'DRAW', playerId:S.playerId, count:7}), 300)
     R()
     return
   }
@@ -651,9 +653,20 @@ function handlePeerMsg(msg) {
   }
 
   if (msg.type === 'PLAYER_READY') {
-    // Update the peer's ready status
     const rp = S.gs?.players?.[msg.playerId]
     if (rp) { rp.ready = true; R() }
+    return
+  }
+
+  if (msg.type === 'PLAYER_LEFT') {
+    const lp = S.gs?.players?.[msg.playerId]
+    if (lp) {
+      lp.connected = false
+      lp.left = true
+      sysMsg(`${lp.name} left the game`)
+      toast(`${lp.name} left the game`, 'warn')
+      R()
+    }
     return
   }
 
@@ -789,6 +802,7 @@ function buildWaiting() {
   const players = gs ? gs.playerOrder.map(id => gs.players[id]).filter(Boolean) : []
   const me = gs?.players?.[S.playerId]
   const allReady = players.length >= 1 && players.every(p => p.ready)
+  const isCreator = gs?.playerOrder?.[0] === S.playerId
 
   const el = div('screen-waiting screen active')
   el.innerHTML = `
@@ -823,12 +837,14 @@ function buildWaiting() {
       <button class="big-btn${me?.ready?' ready-btn':''}" id="wait-ready" style="max-width:280px">
         ${me?.ready ? '✓ Ready!' : 'Press Ready'}
       </button>
-      ${allReady ? `<button class="big-btn start-btn" id="wait-start" style="max-width:280px;background:var(--green2);color:#0a1a0a;margin-top:.5rem">▶ Start Game</button>` : ''}
+      ${allReady && isCreator ? `<button class="big-btn start-btn" id="wait-start" style="max-width:280px;background:var(--green2);color:#0a1a0a;margin-top:.5rem">▶ Start Game</button>` : ''}
     </div>
 
     <div class="wait-hint">
       ${players.length === 1 ? 'Share the room code or invite link with your friends.' : ''}
-      ${allReady ? '🟢 All players ready! Click "Start Game" to begin.' : `${players.filter(p=>p.ready).length}/${players.length} players ready`}
+      ${allReady && isCreator ? '🟢 All players ready! Click "Start Game" to begin.' :
+        allReady && !isCreator ? '🟢 All ready — waiting for room creator to start.' :
+        `${players.filter(p=>p.ready).length}/${players.length} players ready`}
     </div>
 
     <button class="ghost-btn" id="wait-leave" style="margin-top:1rem">← Leave Room</button>
@@ -874,26 +890,26 @@ function gStartGame() {
   const gs = S.gs; if (!gs) return
   const players = gs.playerOrder.map(id => gs.players[id]).filter(Boolean)
   if (!players.every(p => p.ready)) { toast('Not all players are ready yet','warn'); return }
+  // Only room creator (playerOrder[0]) can start
+  if (gs.playerOrder[0] !== S.playerId) { toast('Only the room creator can start the game','warn'); return }
 
-  // Pick a random starting player
+  // Roll once — all peers will use this exact index
   const startingIdx = Math.floor(Math.random() * players.length)
   const startingPlayer = players[startingIdx]
 
-  send({ type:'GAME_START', playerId:S.playerId, startingIdx })
+  // netSend only (don't applyLocal yet — do it below deterministically)
+  netSend({ type:'GAME_START', playerId:S.playerId, startingIdx })
   sysMsg(`🎲 Starting player: ${startingPlayer.name}!`)
   toast(`Starting player: ${startingPlayer.name}!`,'gold')
 
+  // Apply locally with the same index
   gs.started = true
   gs.activePlayerIdx = startingIdx
   gs.turn = 1
   gs.phase = 'Untap'
 
   S.screen = 'game'
-  // Draw 7
-  setTimeout(() => {
-    const p = S.gs?.players?.[S.playerId]; if (!p) return
-    send({ type:'DRAW', playerId:S.playerId, count:7 })
-  }, 300)
+  setTimeout(() => send({ type:'DRAW', playerId:S.playerId, count:7 }), 300)
   R()
 }
 
@@ -1048,7 +1064,13 @@ function buildGame() {
   })
   document.addEventListener('click', () => el.querySelector('#dice-menu')?.classList.remove('show'))
   el.querySelector('#g-coin').addEventListener('click', ()=>{ const r=Math.random()<.5?'Heads':'Tails'; sysMsg(`🪙 ${S.myName}: ${r}`); toast(r,'gold') })
-  el.querySelector('#g-quit').addEventListener('click', ()=>{ if(confirm('Leave game?')){ if(_channel) getSupabase()?.removeChannel(_channel); _channel=null; S.gs=null;S.screen='lobby';R()} })
+  el.querySelector('#g-quit').addEventListener('click', ()=>{
+    if (!confirm('Leave game? Other players will be notified.')) return
+    // Notify peers that we left
+    netSend({ type:'PLAYER_LEFT', playerId:S.playerId, name:S.myName })
+    if (_channel) getSupabase()?.removeChannel(_channel)
+    _channel = null; S.gs = null; S.screen = 'lobby'; R()
+  })
 
   // ── Board tabs (switch between my board and opponent boards) ──
   el.querySelector('#board-tabs').addEventListener('click', e => {
@@ -1451,7 +1473,7 @@ function renderOpponents(el, opponents, gs) {
         <span class="opp-name" style="color:${op.color}">${esc(op.name)}</span>
         <span class="opp-conn ${op.connected?'on':''}">●</span>
       </div>
-      <div class="opp-life ${lifeC}">${op.life}</div>
+      <div class="opp-life ${lifeC}">${op.life}${op.left?"<span style=\"font-size:.6rem;color:var(--red2);margin-left:.4rem\">LEFT</span>":""}</div>
       <div class="opp-adj">
         <button data-op="${op.id}" data-d="-1" class="oadj dn">−1</button>
         <button data-op="${op.id}" data-d="1" class="oadj up">+1</button>
@@ -1562,6 +1584,7 @@ function renderStats(el, me, opponents) {
       <button class="rp-btn" id="rp-token-search">🔍 Search Tokens…</button>
       <button class="rp-btn" id="rp-token">Custom Token…</button>
       <button class="rp-btn" id="rp-viewtop">View Top Cards…</button>
+      <button class="rp-btn" id="rp-conjure">🔮 Conjure Card…</button>
     </div>
   `
 
@@ -1607,6 +1630,7 @@ function renderStats(el, me, opponents) {
   rp.querySelector('#rp-token').addEventListener('click',()=>{ const n=prompt('Token name:'); if(n) gCreateToken(n,'Token Creature','',n.match(/\d+\/\d+/)?.[0]||'') })
   rp.querySelector('#rp-token-search').addEventListener('click',()=>openTokenSearch())
   rp.querySelector('#rp-viewtop').addEventListener('click',()=>openLibraryTopModal())
+  rp.querySelector('#rp-conjure').addEventListener('click',()=>openConjureModal())
 }
 
 // ── Stack bar ──
@@ -1788,6 +1812,7 @@ function openViewModal(card) { S.modal={type:'card',card,zone:'view',readOnly:tr
 function openCountersModal(card, zone) { S.modal={type:'counters',card,zone}; R() }
 function openBoardModal(player) { S.viewingPlayer = player.id; R() }
 function openTokenSearch() { S.modal={type:'tokensearch',query:'',results:[]}; R() }
+function openConjureModal() { S.modal={type:'conjure'}; R() }
 
 function buildModal() {
   const m=S.modal; if(!m) return document.createDocumentFragment()
@@ -1987,19 +2012,35 @@ function buildModal() {
         wrap.appendChild(img)
         wrap.appendChild(Object.assign(div('zc-label'),{textContent:`#${idx+1} ${card.name}`}))
         const btns=div('zc-btns')
-        addZcBtn(btns,'Hand',()=>{ gMoveCard(card.id,'library','hand'); setTimeout(renderGrid,50) })
-        addZcBtn(btns,'Battlefield',()=>{ gMoveCard(card.id,'library','battlefield'); setTimeout(renderGrid,50) })
+        // moveFromLib: remove from library, place in zone, sync WITHOUT closing modal
+        const moveFromLib = (destZone) => {
+          const i = p.library.findIndex(c=>c.id===card.id); if(i<0) return
+          const [moved] = p.library.splice(i,1)
+          p.libraryCount = p.library.length
+          moved.tapped = false
+          if (!p[destZone]) p[destZone]=[]
+          p[destZone].push(moved)
+          // Sync to peers without calling send() which would call applyLocal()->R()
+          netSend({ type:'MOVE_CARD', playerId:S.playerId, cardId:card.id,
+                    fromZone:'library', toZone:destZone, _from:S.playerId })
+          // Also update libraryCount
+          netSend({ type:'PLAYER_UPDATE', playerId:S.playerId,
+                    patch:{libraryCount:p.libraryCount}, _from:S.playerId })
+          renderGrid()
+        }
+        addZcBtn(btns,'Hand',()=>moveFromLib('hand'))
+        addZcBtn(btns,'Battlefield',()=>moveFromLib('battlefield'))
         addZcBtn(btns,'→ Bottom',()=>{
           const i=p.library.findIndex(c=>c.id===card.id)
           if(i>=0){ const [c]=p.library.splice(i,1); p.library.push(c); p.libraryCount=p.library.length
-            send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:p.library,libraryCount:p.libraryCount}}) }
-          setTimeout(renderGrid,50)
+            netSend({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:p.library,libraryCount:p.libraryCount},_from:S.playerId}) }
+          renderGrid()
         })
-        addZcBtn(btns,'GY',()=>{ gMoveCard(card.id,'library','graveyard'); setTimeout(renderGrid,50) })
-        addZcBtn(btns,'Exile',()=>{ gMoveCard(card.id,'library','exile'); setTimeout(renderGrid,50) })
+        addZcBtn(btns,'GY',()=>moveFromLib('graveyard'))
+        addZcBtn(btns,'Exile',()=>moveFromLib('exile'))
         if (idx>0) addZcBtn(btns,'↑',()=>{
           const lib=p.library; [lib[idx-1],lib[idx]]=[lib[idx],lib[idx-1]]
-          send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:lib}}); renderGrid()
+          netSend({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:lib},_from:S.playerId}); renderGrid()
         })
         wrap.appendChild(btns)
         img.addEventListener('click',()=>openCardModal(card,'library'))
@@ -2054,29 +2095,35 @@ function buildModal() {
           wrap.appendChild(img)
           wrap.appendChild(lbl)
           if (pt) wrap.appendChild(Object.assign(div('zc-label'),{textContent:pt,style:'color:var(--gold3)'}))
-          wrap.addEventListener('click', ()=>{
+          const createToken = () => {
             const token = {
-              id:++S.cardIdCounter,
-              name:card.name,
+              id:++S.cardIdCounter, name:card.name,
               type_line:card.type_line||'Token',
               oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
-              mana_cost:'',
-              image_uri:imgUri,
-              pt,
-              tapped:false,
-              summoningSick:false,
-              counters:{},
-              token:true,
+              mana_cost:'', image_uri:imgUri, pt,
+              tapped:false, summoningSick:false, counters:{}, token:true,
             }
-            const p = S.gs?.players?.[S.playerId]
-            if (!p) return
-            if (!p.battlefield) p.battlefield=[]
-            p.battlefield.push(token)
-            send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{battlefield:[...p.battlefield]}})
+            const p2 = S.gs?.players?.[S.playerId]; if(!p2) return
+            if (!p2.battlefield) p2.battlefield=[]
+            p2.battlefield.push(token)
+            send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{battlefield:[...p2.battlefield]}})
             toast('Token created: '+card.name,'good')
             sysMsg(S.myName+' created '+card.name+' token')
             S.modal=null; R()
+          }
+          // Left-click image = preview card detail, double-click or button = create
+          img.addEventListener('click', ()=>{
+            S.modal = { type:'card', card:{
+              id:-1, name:card.name, type_line:card.type_line||'Token',
+              oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
+              image_uri:imgUri, pt, mana_cost:'', counters:{}
+            }, zone:'view', readOnly:true }
+            R()
           })
+          const addBtn2 = document.createElement('button')
+          addBtn2.className='zca-btn'; addBtn2.textContent='+ Create'
+          addBtn2.addEventListener('click', createToken)
+          wrap.appendChild(addBtn2)
           res.appendChild(wrap)
         })
       } catch(err) {
@@ -2088,6 +2135,93 @@ function buildModal() {
     bg.querySelector('#ts-q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch() })
     // Auto-search common tokens if empty
     setTimeout(()=>{ bg.querySelector('#ts-q').focus() }, 50)
+  }
+
+  else if (m.type==='conjure') {
+    // Conjure: search Scryfall, add card directly to hand/battlefield.
+    // Conjured cards have a special "banish" action that removes them entirely.
+    bg.innerHTML=`<div class="modal" style="max-width:520px;width:95vw">
+      <div class="modal-hdr">
+        <h3>🔮 Conjure Card</h3>
+        <button class="x-btn" id="conj-close">✕</button>
+      </div>
+      <div class="modal-body" style="gap:.4rem">
+        <div style="font-size:.72rem;color:var(--text3);line-height:1.5">
+          Add any card directly into the game from outside. Conjured cards can be
+          <b style="color:var(--purple2)">banished</b> (right-click → Banish) to remove them
+          from existence entirely — they won't go to GY, exile, or anywhere.
+        </div>
+        <div style="display:flex;gap:.4rem">
+          <input id="conj-q" class="db-si" placeholder="Search any card name…" style="flex:1" />
+          <button class="db-sbtn" id="conj-go">Search</button>
+        </div>
+        <div style="display:flex;gap:.4rem;flex-wrap:wrap" id="conj-dest-row">
+          <span style="font-size:.7rem;color:var(--text3);align-self:center">Add to:</span>
+          <button class="zca-btn conj-dest on" data-dest="hand">Hand</button>
+          <button class="zca-btn conj-dest" data-dest="battlefield">Battlefield</button>
+        </div>
+        <div id="conj-results" style="display:flex;flex-wrap:wrap;gap:.5rem;overflow-y:auto;max-height:340px;padding:.2rem 0"></div>
+      </div>
+    </div>`
+    let conjDest = 'hand'
+    bg.querySelector('#conj-close').addEventListener('click',()=>{S.modal=null;R()})
+    bg.addEventListener('click',e=>{if(e.target===bg){S.modal=null;R()}})
+    bg.querySelectorAll('.conj-dest').forEach(b=>b.addEventListener('click',()=>{
+      bg.querySelectorAll('.conj-dest').forEach(x=>x.classList.remove('on'))
+      b.classList.add('on'); conjDest=b.dataset.dest
+    }))
+
+    const conjSearch = async () => {
+      const q = bg.querySelector('#conj-q').value.trim(); if(!q) return
+      const res = bg.querySelector('#conj-results')
+      res.innerHTML='<div class="empty-hint">Searching…</div>'
+      try {
+        const resp = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q)}&unique=cards&order=name`)
+        if (!resp.ok) { res.innerHTML='<div class="empty-hint">No results.</div>'; return }
+        const data = await resp.json()
+        res.innerHTML=''
+        ;(data.data||[]).slice(0,20).forEach(card => {
+          const imgUri = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal||''
+          const smallUri = card.image_uris?.small || card.card_faces?.[0]?.image_uris?.small||''
+          if (!imgUri) return
+          const wrap = div('zc-wrap')
+          const img = document.createElement('img')
+          img.src = smallUri||imgUri; img.loading='lazy'
+          img.style.cssText='width:74px;height:103px;object-fit:cover;border-radius:4px;border:1.5px solid var(--border2);cursor:pointer;transition:border-color .12s'
+          img.addEventListener('mouseenter',()=>img.style.borderColor='var(--purple2)')
+          img.addEventListener('mouseleave',()=>img.style.borderColor='var(--border2)')
+          const lbl = Object.assign(div('zc-label'),{textContent:card.name})
+          const addBtn = document.createElement('button')
+          addBtn.className='zca-btn'; addBtn.textContent='+ Add'
+          addBtn.style.cssText='border-color:var(--purple2);color:var(--purple2)'
+          const doAdd = () => {
+            const p2 = S.gs?.players?.[S.playerId]; if(!p2) return
+            const conjCard = {
+              id:++S.cardIdCounter, name:card.name,
+              type_line:card.type_line||'', mana_cost:card.mana_cost||'',
+              oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
+              image_uri:imgUri, pt:(card.power&&card.toughness)?card.power+'/'+card.toughness:'',
+              loyalty:card.loyalty||'', tapped:false, summoningSick:false,
+              counters:{}, token:false, conjured:true  // mark as conjured for banish action
+            }
+            if (!p2[conjDest]) p2[conjDest]=[]
+            p2[conjDest].push(conjCard)
+            send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{[conjDest]:[...p2[conjDest]]}})
+            toast(`Conjured: ${card.name} → ${conjDest}`,'gold')
+            sysMsg(`${S.myName} conjured ${card.name} into ${conjDest}`)
+            S.modal=null; R()
+          }
+          addBtn.addEventListener('click', doAdd)
+          img.addEventListener('click', doAdd)
+          wrap.appendChild(img); wrap.appendChild(lbl); wrap.appendChild(addBtn)
+          res.appendChild(wrap)
+        })
+        if (!res.children.length) res.innerHTML='<div class="empty-hint">No results.</div>'
+      } catch { res.innerHTML='<div class="empty-hint">Search failed.</div>' }
+    }
+    bg.querySelector('#conj-go').addEventListener('click', conjSearch)
+    bg.querySelector('#conj-q').addEventListener('keydown',e=>e.key==='Enter'&&conjSearch())
+    setTimeout(()=>bg.querySelector('#conj-q')?.focus(),50)
   }
 
   return bg
@@ -2120,6 +2254,24 @@ function getCardActions(card, zone) {
     add('✦ Exile',()=>{ gMoveCard(card.id,'battlefield','exile'); sysMsg(`${S.myName}: ${card.name} → exile`) },{red:true})
     add('↩ Bounce to hand',()=>{ gMoveCard(card.id,'battlefield','hand'); sysMsg(`${S.myName}: ${card.name} → hand`) })
     add('📚 Return to library',()=>gMoveCard(card.id,'battlefield','library_bottom'))
+    if (card.token || card.conjured) {
+      add('💨 Banish (remove from existence)',()=>{
+        const p = S.gs?.players?.[S.playerId]
+        if (!p) return
+        // Remove card from wherever it is — no zone, just gone
+        ;['battlefield','graveyard','exile','hand','commandZone'].forEach(z=>{
+          if (p[z]) p[z] = p[z].filter(c=>c.id!==card.id)
+        })
+        send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{
+          battlefield:[...(p.battlefield||[])],
+          graveyard:[...(p.graveyard||[])],
+          exile:[...(p.exile||[])],
+          hand:[...(p.hand||[])],
+        }})
+        toast(`${card.name} banished from existence`,'gold')
+        sysMsg(`${S.myName} banished ${card.name}`)
+      },{red:true})
+    }
   } else if (zone==='graveyard') {
     add('↩ Return to hand',()=>{ gMoveCard(card.id,'graveyard','hand'); sysMsg(`${S.myName}: ${card.name} from GY → hand`) })
     add('↑ Return to battlefield',()=>{ gMoveCard(card.id,'graveyard','battlefield'); sysMsg(`${S.myName}: ${card.name} from GY → battlefield`) })
@@ -2157,6 +2309,11 @@ function showBfCtx(card,e) {
     {label:'👑 Return to command zone',                   action:()=>gMoveCard(card.id,'battlefield','commandZone')},
     {sep:true},
     {label:'🔍 View full card details',                   action:()=>openCardModal(card,'battlefield')},
+    ...(card.token||card.conjured ? [{sep:true},{label:'💨 Banish (remove from existence)', action:()=>{
+      const p=S.gs?.players?.[S.playerId]; if(!p) return
+      ;['battlefield','graveyard','exile','hand','commandZone'].forEach(z=>{ if(p[z]) p[z]=p[z].filter(c=>c.id!==card.id) })
+      send({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{battlefield:[...(p.battlefield||[])],graveyard:[...(p.graveyard||[])],exile:[...(p.exile||[])],hand:[...(p.hand||[])]}}); toast(`${card.name} banished`,'gold'); sysMsg(`${S.myName} banished ${card.name}`)
+    }, red:true}] : []),
   ])
 }
 function showHandCtx(card,e) {
