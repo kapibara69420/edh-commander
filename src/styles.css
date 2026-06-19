@@ -207,9 +207,9 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .hand-lbl{font-size:.58rem;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.2rem;user-select:none}
 .g-hand{display:flex;align-items:flex-end;flex:1;overflow-x:auto;padding-bottom:2px}
 .hand-count{font-size:.62rem;color:var(--text4);margin-top:.15rem}
-.hcard{width:88px;height:123px;border-radius:5px;border:2px solid var(--border2);overflow:hidden;background:var(--bg3);cursor:grab;flex-shrink:0;transition:transform .12s,border-color .12s;margin-right:-22px;position:relative}
+.hcard{width:var(--hcard-w,88px);height:var(--hcard-h,123px);border-radius:5px;border:2px solid var(--border2);overflow:hidden;background:var(--bg3);cursor:grab;flex-shrink:0;transition:width .08s,height .08s,transform .12s,border-color .12s;margin-right:calc(-1 * var(--hcard-overlap,22px));position:relative}
 .hcard:last-child{margin-right:0}
-.hcard:hover{border-color:var(--gold2);transform:translateY(-22px) scale(1.18);z-index:20;margin-right:4px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
+.hcard:hover{border-color:var(--gold2);transform:translateY(calc(-1 * var(--hcard-overlap,22px))) scale(1.18);z-index:20;margin-right:4px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
 .hcard:active{cursor:grabbing}
 .hcard.dragging{opacity:.35}
 .hcard img{width:100%;height:100%;object-fit:cover;pointer-events:none}

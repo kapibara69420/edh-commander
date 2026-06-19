@@ -29,6 +29,15 @@ const S = {
 }
 
 const COLORS = ['#3a7acc','#d44040','#35955a','#c8952a','#7a48c0','#289888','#cc6633']
+
+// The "room creator" is whoever has the LOWEST playerId. Since playerId starts
+// with Date.now().toString(36), the lowest id = earliest joiner. This is computed
+// fresh from current playerOrder so every client agrees, regardless of the order
+// in which they personally discovered other players.
+function getCreatorId(gs) {
+  if (!gs?.playerOrder?.length) return null
+  return [...gs.playerOrder].sort()[0]
+}
 let lobbyColorIdx = 0
 
 // Standard counter types offered as quick buttons
@@ -545,7 +554,8 @@ function startGame() {
         // Tell everyone we joined (sends our full player state)
         netSend({ type:'ANNOUNCE',
           playerId:S.playerId, name:S.myName, color:S.myColor,
-          deckList:lib, commandZone:commandZone, startLife:S.startLife })
+          deckList:lib, commandZone:commandZone, startLife:S.startLife,
+          creatorId: S.gs?.creatorId })
         // Ask everyone already in the room to re-announce themselves to us
         netSend({ type:'REQ_ANNOUNCE', fromId:S.playerId })
         sysMsg(S.myName+' joined')
@@ -607,6 +617,10 @@ function handlePeerMsg(msg) {
       connected: true,
       ready: snap.ready || false,
     }
+    // Sync creatorId from announcer (creator always knows who they are)
+    if (msg.creatorId && !S.gs.creatorId) {
+      S.gs.creatorId = msg.creatorId
+    }
     if (S.gs.started) {
       sysMsg((msg.name||'Someone')+' reconnected')
     } else {
@@ -618,10 +632,12 @@ function handlePeerMsg(msg) {
 
   if (msg.type === 'GAME_START') {
     if (S.screen !== 'waiting') return  // already in game
-    // Apply the exact startingIdx the creator rolled — no re-roll
     const gs = S.gs; if (!gs) return
     gs.started = true
-    gs.activePlayerIdx = msg.startingIdx !== undefined ? msg.startingIdx : 0
+    // Use the player ID sent by creator — works regardless of join order
+    const spId = msg.startingPlayerId
+    gs.activePlayerIdx = spId ? gs.playerOrder.indexOf(spId) : 0
+    if (gs.activePlayerIdx < 0) gs.activePlayerIdx = 0
     gs.turn = 1
     gs.phase = 'Untap'
     const startingPlayer = gs.players[gs.playerOrder[gs.activePlayerIdx]]
@@ -642,6 +658,7 @@ function handlePeerMsg(msg) {
       type:'ANNOUNCE',
       playerId:S.playerId, name:S.myName, color:S.myColor,
       deckList:me.library, commandZone:me.commandZone, startLife:S.startLife,
+      creatorId: S.gs?.creatorId,   // share who the creator is
       snapshot: {
         life:me.life, cmdDmg:me.cmdDmg, mana:me.mana, counters:me.counters,
         hand:me.hand, battlefield:me.battlefield, graveyard:me.graveyard,
@@ -686,7 +703,8 @@ function makeLocalState(lib, commandZone) {
   return {
     players:{[S.playerId]:p}, playerOrder:[S.playerId],
     turn:1, activePlayerIdx:0, phase:'Untap',
-    stack:[], stackCounter:0, chat:[]
+    stack:[], stackCounter:0, chat:[],
+    creatorId: S.playerId   // whoever creates the room is the creator
   }
 }
 
@@ -758,11 +776,12 @@ function applyLocal(msg) {
     }
     case 'STACK_COUNTER': gs.stack=gs.stack.filter(s=>s.id!==msg.stackId); break
     case 'GAME_START': {
-      // Pick random starting player from all connected players
-      gs.activePlayerIdx = msg.startingIdx !== undefined ? msg.startingIdx : 0
       gs.started = true
       gs.phase = 'Untap'
       gs.turn = 1
+      const spId2 = msg.startingPlayerId
+      gs.activePlayerIdx = spId2 ? gs.playerOrder.indexOf(spId2) : (msg.startingIdx||0)
+      if (gs.activePlayerIdx < 0) gs.activePlayerIdx = 0
       break
     }
     case 'NEXT_TURN': {
@@ -802,7 +821,7 @@ function buildWaiting() {
   const players = gs ? gs.playerOrder.map(id => gs.players[id]).filter(Boolean) : []
   const me = gs?.players?.[S.playerId]
   const allReady = players.length >= 1 && players.every(p => p.ready)
-  const isCreator = gs?.playerOrder?.[0] === S.playerId
+  const isCreator = getCreatorId(gs) === S.playerId
 
   const el = div('screen-waiting screen active')
   el.innerHTML = `
@@ -891,20 +910,21 @@ function gStartGame() {
   const players = gs.playerOrder.map(id => gs.players[id]).filter(Boolean)
   if (!players.every(p => p.ready)) { toast('Not all players are ready yet','warn'); return }
   // Only room creator (playerOrder[0]) can start
-  if (gs.playerOrder[0] !== S.playerId) { toast('Only the room creator can start the game','warn'); return }
+  const creatorId = getCreatorId(gs)
+  if (creatorId !== S.playerId) { toast('Only the room creator can start the game','warn'); return }
 
-  // Roll once — all peers will use this exact index
-  const startingIdx = Math.floor(Math.random() * players.length)
-  const startingPlayer = players[startingIdx]
+  // Roll once — send the PLAYER ID (not index) so all peers agree regardless of join order
+  const startingPlayer = players[Math.floor(Math.random() * players.length)]
+  const startingPlayerId = startingPlayer.id
 
-  // netSend only (don't applyLocal yet — do it below deterministically)
-  netSend({ type:'GAME_START', playerId:S.playerId, startingIdx })
+  netSend({ type:'GAME_START', playerId:S.playerId, startingPlayerId })
   sysMsg(`🎲 Starting player: ${startingPlayer.name}!`)
   toast(`Starting player: ${startingPlayer.name}!`,'gold')
 
-  // Apply locally with the same index
+  // Apply locally: find the index of that player in OUR playerOrder
   gs.started = true
-  gs.activePlayerIdx = startingIdx
+  gs.activePlayerIdx = gs.playerOrder.indexOf(startingPlayerId)
+  if (gs.activePlayerIdx < 0) gs.activePlayerIdx = 0
   gs.turn = 1
   gs.phase = 'Untap'
 
@@ -1159,8 +1179,14 @@ function buildGame() {
   // ── Resizable panels ──
   wireResize(el.querySelector('#bottom-resize'), 'v-inv', h => {
     document.documentElement.style.setProperty('--bottom-strip-h', `${h}px`)
+    // Card height = strip height minus label/padding (about 40px overhead)
+    const cardH = Math.max(60, h - 40)
+    const cardW = Math.round(cardH * 0.72)  // MTG card ratio ~0.716
+    document.documentElement.style.setProperty('--hcard-h', `${cardH}px`)
+    document.documentElement.style.setProperty('--hcard-w', `${cardW}px`)
+    document.documentElement.style.setProperty('--hcard-overlap', `${Math.round(cardW * 0.25)}px`)
     localStorage.setItem('edh_bottomstrip_h', h)
-  }, () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--bottom-strip-h')||'148'), 90, 320)
+  }, () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--bottom-strip-h')||'148'), 90, 420)
 
   wireResize(el.querySelector('#stats-resize'), 'h-rev', w => {
     document.documentElement.style.setProperty('--stats-w', `${w}px`)
@@ -1191,6 +1217,13 @@ function buildGame() {
 
   // Restore saved sizes
   restoreSize('--bottom-strip-h','edh_bottomstrip_h')
+  // Recompute hcard size from saved strip height
+  const savedH = parseInt(localStorage.getItem('edh_bottomstrip_h')||'148')
+  const savedCardH = Math.max(60, savedH - 40)
+  const savedCardW = Math.round(savedCardH * 0.72)
+  document.documentElement.style.setProperty('--hcard-h', `${savedCardH}px`)
+  document.documentElement.style.setProperty('--hcard-w', `${savedCardW}px`)
+  document.documentElement.style.setProperty('--hcard-overlap', `${Math.round(savedCardW * 0.25)}px`)
   restoreSize('--stats-w','edh_stats_w')
   restoreSize('--opps-h','edh_opps_h')
   restoreSize('--opps-w','edh_opps_w')
@@ -1817,7 +1850,7 @@ function openConjureModal() { S.modal={type:'conjure'}; R() }
 function buildModal() {
   const m=S.modal; if(!m) return document.createDocumentFragment()
   const bg = div('modal-bg')
-  bg.addEventListener('click', e=>{ if(e.target===bg){S.modal=null;R()} })
+  bg.addEventListener('click', e=>{ if(e.target===bg){ if(S.modal?.onClose){S.modal.onClose()}else{S.modal=null;R()} } })
 
   if (m.type==='card') {
     const {card,zone,readOnly}=m
@@ -1834,7 +1867,7 @@ function buildModal() {
         <div class="modal-acts" id="modal-acts"></div>
       </div>
     </div>`
-    bg.querySelector('#mc-close').addEventListener('click',()=>{S.modal=null;R()})
+    bg.querySelector('#mc-close').addEventListener('click',()=>{ if(m.onClose){m.onClose()}else{S.modal=null;R()} })
     const actsEl=bg.querySelector('#modal-acts')
     actions.forEach(a=>{
       const b=document.createElement('button'); b.className='ma-btn'+(a.red?' red':'')+(a.gold?' gold':'')
@@ -1964,7 +1997,13 @@ function buildModal() {
   else if (m.type==='libtop') {
     const p = me()
     const n = m.count
-    const top = (p.library||[]).slice(0, n)
+    // workingSet: fixed list of card IDs we're inspecting.
+    // Set ONCE when modal opens. Never auto-replaced when cards move out.
+    // Increasing count appends more cards from library top.
+    if (!m.workingSet) {
+      m.workingSet = (p.library||[]).slice(0, n).map(c=>c.id)
+    }
+
     bg.innerHTML=`<div class="modal" style="max-width:560px;width:95vw">
       <div class="modal-hdr"><h3>${esc(m.label)}</h3><button class="x-btn" id="lt-close">✕</button></div>
       <div class="modal-body">
@@ -1986,33 +2025,49 @@ function buildModal() {
     bg.querySelector('#lt-shuffle-rest').addEventListener('click',()=>{
       send({type:'SHUFFLE',playerId:S.playerId}); toast('Library shuffled','good'); S.modal=null; R()
     })
-    // Number controls
     const countIn = bg.querySelector('#lt-count')
     const updateCount = () => {
       const newN = Math.max(1, Math.min(p.library?.length||1, parseInt(countIn.value)||1))
       countIn.value = newN
       S.modal.count = newN
+      const ws = S.modal.workingSet
+      if (ws) {
+        // Count how many workingSet cards are still in the library (not moved out)
+        const visibleCount = ws.filter(id => p.library?.find(c=>c.id===id)).length
+        // If we need more visible cards, append from top of library (never replace moved-out slots)
+        if (visibleCount < newN) {
+          const need = newN - visibleCount
+          let added = 0
+          for (const card of (p.library||[])) {
+            if (added >= need) break
+            if (!ws.includes(card.id)) { ws.push(card.id); added++ }
+          }
+        }
+      }
       renderGrid()
     }
     bg.querySelector('#lt-dec').addEventListener('click',()=>{ countIn.value=Math.max(1,parseInt(countIn.value||1)-1); updateCount() })
     bg.querySelector('#lt-inc').addEventListener('click',()=>{ countIn.value=parseInt(countIn.value||1)+1; updateCount() })
     countIn.addEventListener('change', updateCount)
-    countIn.addEventListener('input', updateCount)  // live update as you type
+    countIn.addEventListener('input', updateCount)
 
     const grid = bg.querySelector('#libtop-grid')
     const renderGrid = () => {
       grid.innerHTML=''
-      const cards = (p.library||[]).slice(0, S.modal?.count || n)
-      if (!cards.length) { grid.innerHTML='<div class="empty-hint">Library is empty.</div>'; return }
-      cards.forEach((card,idx) => {
+      // Only show cards that are still in working set AND still in library
+      const cards = (m.workingSet||[])
+        .map(id => p.library?.find(c=>c.id===id))
+        .filter(Boolean)
+      if (!cards.length) { grid.innerHTML='<div class="empty-hint">All cards moved. Click Done.</div>'; return }
+      cards.forEach((card, idx) => {
         const wrap=div('zc-wrap')
         const img=div('zc-img')
         if(card.image_uri) img.innerHTML=`<img src="${card.image_uri}" loading="lazy" />`
         else { img.innerHTML=`<div class="zc-name">${esc(card.name)}</div>`; fetchCard(card.name).then(d=>{if(d?.image_uri){card.image_uri=d.image_uri;img.innerHTML=`<img src="${d.image_uri}" loading="lazy" />`}}) }
         wrap.appendChild(img)
-        wrap.appendChild(Object.assign(div('zc-label'),{textContent:`#${idx+1} ${card.name}`}))
+        wrap.appendChild(Object.assign(div('zc-label'),{textContent:`${card.name}`}))
         const btns=div('zc-btns')
-        // moveFromLib: remove from library, place in zone, sync WITHOUT closing modal
+        // moveFromLib: remove from library, add to zone, remove from working set, re-render
         const moveFromLib = (destZone) => {
           const i = p.library.findIndex(c=>c.id===card.id); if(i<0) return
           const [moved] = p.library.splice(i,1)
@@ -2020,10 +2075,10 @@ function buildModal() {
           moved.tapped = false
           if (!p[destZone]) p[destZone]=[]
           p[destZone].push(moved)
-          // Sync to peers without calling send() which would call applyLocal()->R()
+          // Remove from working set so it doesn't show again
+          if (m.workingSet) m.workingSet = m.workingSet.filter(id=>id!==card.id)
           netSend({ type:'MOVE_CARD', playerId:S.playerId, cardId:card.id,
                     fromZone:'library', toZone:destZone, _from:S.playerId })
-          // Also update libraryCount
           netSend({ type:'PLAYER_UPDATE', playerId:S.playerId,
                     patch:{libraryCount:p.libraryCount}, _from:S.playerId })
           renderGrid()
@@ -2032,15 +2087,23 @@ function buildModal() {
         addZcBtn(btns,'Battlefield',()=>moveFromLib('battlefield'))
         addZcBtn(btns,'→ Bottom',()=>{
           const i=p.library.findIndex(c=>c.id===card.id)
-          if(i>=0){ const [c]=p.library.splice(i,1); p.library.push(c); p.libraryCount=p.library.length
+          if(i>=0){ const [cc]=p.library.splice(i,1); p.library.push(cc); p.libraryCount=p.library.length
             netSend({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:p.library,libraryCount:p.libraryCount},_from:S.playerId}) }
+          if (m.workingSet) m.workingSet=m.workingSet.filter(id=>id!==card.id)
           renderGrid()
         })
         addZcBtn(btns,'GY',()=>moveFromLib('graveyard'))
         addZcBtn(btns,'Exile',()=>moveFromLib('exile'))
         if (idx>0) addZcBtn(btns,'↑',()=>{
-          const lib=p.library; [lib[idx-1],lib[idx]]=[lib[idx],lib[idx-1]]
-          netSend({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:lib},_from:S.playerId}); renderGrid()
+          // Reorder in working set
+          if(m.workingSet){[m.workingSet[idx-1],m.workingSet[idx]]=[m.workingSet[idx],m.workingSet[idx-1]]}
+          // Also reorder in actual library
+          const li=p.library.findIndex(c=>c.id===card.id)
+          const prevCard=cards[idx-1]
+          const li2=p.library.findIndex(c=>c.id===prevCard?.id)
+          if(li>=0&&li2>=0){[p.library[li2],p.library[li]]=[p.library[li],p.library[li2]]}
+          netSend({type:'PLAYER_UPDATE',playerId:S.playerId,patch:{library:p.library},_from:S.playerId})
+          renderGrid()
         })
         wrap.appendChild(btns)
         img.addEventListener('click',()=>openCardModal(card,'library'))
@@ -2065,9 +2128,16 @@ function buildModal() {
     bg.querySelector('#ts-close').addEventListener('click',()=>{S.modal=null;R()})
     bg.addEventListener('click',e=>{if(e.target===bg){S.modal=null;R()}})
 
+    // Restore previous results if returning from card preview
+    if (m.cachedResults?.length) {
+      setTimeout(() => renderTokenResults(m.cachedResults, bg), 0)
+      if (m.lastQuery) bg.querySelector('#ts-q').value = m.lastQuery
+    }
+
     const doSearch = async () => {
       const q = bg.querySelector('#ts-q').value.trim()
       if (!q) return
+      m.lastQuery = q
       const res = bg.querySelector('#ts-results')
       res.innerHTML = '<div class="empty-hint">Searching Scryfall tokens…</div>'
       try {
@@ -2077,7 +2147,17 @@ function buildModal() {
         const data = await resp.json()
         res.innerHTML = ''
         if (!data.data?.length) { res.innerHTML='<div class="empty-hint">No tokens found.</div>'; return }
-        data.data.slice(0,40).forEach(card => {
+        m.cachedResults = data.data.slice(0,40)
+        renderTokenResults(m.cachedResults, bg)
+      } catch(err) {
+        res.innerHTML='<div class="empty-hint">Search failed — check internet connection.</div>'
+      }
+    }
+
+    function renderTokenResults(cards, bgEl) {
+      const res2 = bgEl.querySelector('#ts-results'); if(!res2) return
+      res2.innerHTML=''
+      cards.forEach(card => {
           const imgUri = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || ''
           const smallUri = card.image_uris?.small || card.card_faces?.[0]?.image_uris?.small || ''
           if (!imgUri) return
@@ -2111,13 +2191,16 @@ function buildModal() {
             sysMsg(S.myName+' created '+card.name+' token')
             S.modal=null; R()
           }
-          // Left-click image = preview card detail, double-click or button = create
+          // Left-click image = preview card detail; X button returns to token search
           img.addEventListener('click', ()=>{
-            S.modal = { type:'card', card:{
-              id:-1, name:card.name, type_line:card.type_line||'Token',
-              oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
-              image_uri:imgUri, pt, mana_cost:'', counters:{}
-            }, zone:'view', readOnly:true }
+            const savedModal = { ...S.modal }  // snapshot (includes cachedResults & lastQuery)
+            S.modal = { type:'card',
+              card:{ id:-1, name:card.name, type_line:card.type_line||'Token',
+                oracle_text:card.oracle_text||card.card_faces?.[0]?.oracle_text||'',
+                image_uri:imgUri, pt, mana_cost:'', counters:{} },
+              zone:'view', readOnly:true,
+              onClose: () => { S.modal = savedModal; R() }  // ← back to token search with results
+            }
             R()
           })
           const addBtn2 = document.createElement('button')
@@ -2126,9 +2209,6 @@ function buildModal() {
           wrap.appendChild(addBtn2)
           res.appendChild(wrap)
         })
-      } catch(err) {
-        res.innerHTML='<div class="empty-hint">Search failed — check internet connection.</div>'
-      }
     }
 
     bg.querySelector('#ts-go').addEventListener('click', doSearch)
