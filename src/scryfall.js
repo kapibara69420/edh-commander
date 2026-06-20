@@ -18,14 +18,28 @@ let _lastRequestAt = 0
 const MIN_GAP_MS = 350
 let _chain = Promise.resolve()
 
-function throttledFetch(url, options) {
-  _chain = _chain.then(async () => {
+// Queues `task` (an async function) so it runs only after all previously
+// queued tasks have settled, with at least MIN_GAP_MS between the START
+// of each task. Critically, the chain is reassigned to include the task
+// itself (not just the delay), and a rejection in one task never breaks
+// the chain for subsequent queued tasks.
+function enqueue(task) {
+  const run = _chain.then(async () => {
     const now = Date.now()
     const wait = Math.max(0, _lastRequestAt + MIN_GAP_MS - now)
     if (wait > 0) await new Promise(r => setTimeout(r, wait))
     _lastRequestAt = Date.now()
+    return task()
   })
-  return _chain.then(() => fetchWithRetry(url, options))
+  // Keep the chain alive even if this task rejects, so the NEXT queued
+  // task still runs after the correct delay instead of the whole queue
+  // getting stuck or racing ahead.
+  _chain = run.catch(() => {})
+  return run
+}
+
+function throttledFetch(url, options) {
+  return enqueue(() => fetchWithRetry(url, options))
 }
 
 // Retries once on 429 (rate limited) after waiting, and surfaces a
@@ -36,8 +50,12 @@ async function fetchWithRetry(url, options, attempt = 0) {
   try {
     res = await fetch(url, options)
   } catch (err) {
-    // True network/CORS failure (offline, blocked, DNS, etc.)
-    throw new Error('NETWORK_ERROR: ' + (err?.message || 'fetch failed'))
+    // True network/CORS/offline/DNS failure. Keep the real browser message
+    // attached so the UI can show exactly what went wrong instead of a
+    // generic guess — "Failed to fetch" vs "NetworkError" vs a CORS message
+    // all mean different things and are worth distinguishing when debugging.
+    const reason = err?.message || String(err) || 'unknown fetch failure'
+    throw new Error('NETWORK_ERROR: ' + reason)
   }
   if (res.status === 429 && attempt < 2) {
     // Rate limited — back off and retry

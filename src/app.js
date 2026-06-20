@@ -455,11 +455,12 @@ async function dbSearch(el) {
     results = await searchCards(q)
   } catch (err) {
     console.error('Deck search failed:', err)
-    const msg = (err?.message || '').includes('NETWORK_ERROR')
-      ? 'Network error — check your internet connection.'
-      : (err?.message || '').includes('SCRYFALL_429')
+    const raw = err?.message || 'unknown error'
+    const msg = raw.includes('NETWORK_ERROR')
+      ? 'Network error: ' + raw.replace('NETWORK_ERROR: ', '')
+      : raw.includes('SCRYFALL_429')
         ? 'Scryfall rate limit hit — wait a few seconds and try again.'
-        : 'Search failed: ' + (err?.message || 'unknown error')
+        : 'Search failed: ' + raw
     sr.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
     return
   }
@@ -2197,11 +2198,12 @@ function buildModal() {
         renderTokenResults(m.cachedResults, bg)
       } catch(err) {
         console.error('Token search failed:', err)
-        const msg = (err?.message || '').includes('NETWORK_ERROR')
-          ? 'Network error — check your internet connection.'
-          : (err?.message || '').includes('SCRYFALL_429')
+        const raw = err?.message || 'unknown error'
+        const msg = raw.includes('NETWORK_ERROR')
+          ? 'Network error: ' + raw.replace('NETWORK_ERROR: ', '')
+          : raw.includes('SCRYFALL_429')
             ? 'Scryfall rate limit hit — wait a few seconds and try again.'
-            : 'Search failed: ' + (err?.message || 'unknown error')
+            : 'Search failed: ' + raw
         res.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
       }
     }
@@ -2350,11 +2352,12 @@ function buildModal() {
         if (!res.children.length) res.innerHTML='<div class="empty-hint">No results.</div>'
       } catch(err) {
         console.error('Conjure search failed:', err)
-        const msg = (err?.message || '').includes('NETWORK_ERROR')
-          ? 'Network error — check your internet connection.'
-          : (err?.message || '').includes('SCRYFALL_429')
+        const raw = err?.message || 'unknown error'
+        const msg = raw.includes('NETWORK_ERROR')
+          ? 'Network error: ' + raw.replace('NETWORK_ERROR: ', '')
+          : raw.includes('SCRYFALL_429')
             ? 'Scryfall rate limit hit — wait a few seconds and try again.'
-            : 'Search failed: ' + (err?.message || 'unknown error')
+            : 'Search failed: ' + raw
         res.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
       }
     }
