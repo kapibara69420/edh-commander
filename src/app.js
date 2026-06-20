@@ -2261,7 +2261,7 @@ function buildModal() {
           addBtn2.className='zca-btn'; addBtn2.textContent='+ Create'
           addBtn2.addEventListener('click', createToken)
           wrap.appendChild(addBtn2)
-          res.appendChild(wrap)
+          res2.appendChild(wrap)
         })
     }
 
