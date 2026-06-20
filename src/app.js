@@ -3,7 +3,7 @@
 // ║  Real-time multiplayer MTG Commander client                      ║
 // ╚══════════════════════════════════════════════════════════════════╝
 import { createClient } from '@supabase/supabase-js'
-import { fetchCard, searchCards, prefetchDeck, inferZone } from './scryfall.js'
+import { fetchCard, searchCards, searchTokens, prefetchDeck, inferZone } from './scryfall.js'
 import { loadDecks, saveDeck, deleteDeck, exportDeckFile, importDeckFile,
          parseDeckText, groupByType, newDeck, buildLibrary } from './deckstore.js'
 
@@ -65,6 +65,7 @@ export function App() {
 }
 
 function R() {
+  hideHandPreview()  // never leave a floating card preview pointing at a stale DOM node
   $root.innerHTML = ''
   if (S.screen === 'lobby')       $root.appendChild(buildLobby())
   if (S.screen === 'deckbuilder') $root.appendChild(buildDeckBuilder())
@@ -449,7 +450,19 @@ async function dbSearch(el) {
   const q = el.querySelector('#db-sq').value.trim(); if (!q) return
   const sr = el.querySelector('#db-sr')
   sr.innerHTML = '<div class="empty-hint">Searching…</div>'
-  const results = await searchCards(q)
+  let results = []
+  try {
+    results = await searchCards(q)
+  } catch (err) {
+    console.error('Deck search failed:', err)
+    const msg = (err?.message || '').includes('NETWORK_ERROR')
+      ? 'Network error — check your internet connection.'
+      : (err?.message || '').includes('SCRYFALL_429')
+        ? 'Scryfall rate limit hit — wait a few seconds and try again.'
+        : 'Search failed: ' + (err?.message || 'unknown error')
+    sr.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
+    return
+  }
   if (!results.length) { sr.innerHTML='<div class="empty-hint">No results.</div>'; return }
   sr.innerHTML = results.slice(0,25).map(c=>`
     <div class="db-rrow" data-name="${esc(c.name)}">
@@ -1484,11 +1497,47 @@ function renderHand(el, me, readOnly=false) {
     else { d.innerHTML=`<div class="card-face"><div class="cf-name">${esc(card.name)}</div><div class="cf-type">${esc(card.type_line||'')}</div><div class="cf-cost">${esc(card.mana_cost||'')}</div></div>`; fetchCard(card.name).then(x=>{ if(x?.image_uri){card.image_uri=x.image_uri;d.innerHTML=`<img src="${x.image_uri}" loading="lazy" draggable="false" />`} }) }
     d.addEventListener('click', e=>{ e.stopPropagation(); openCardModal(card,'hand') })
     d.addEventListener('contextmenu', e=>{ e.preventDefault(); showHandCtx(card,e) })
-    d.addEventListener('dragstart', e=>{ d.classList.add('dragging'); e.dataTransfer.setData('cid',card.id); e.dataTransfer.setData('from','hand') })
+    d.addEventListener('dragstart', e=>{ d.classList.add('dragging'); hideHandPreview(); e.dataTransfer.setData('cid',card.id); e.dataTransfer.setData('from','hand') })
     d.addEventListener('dragend', ()=>d.classList.remove('dragging'))
+    // Hover preview rendered at document root — escapes overflow:hidden on
+    // every ancestor (hand wrap, bottom strip, center, body, game screen)
+    // so the enlarged card is never clipped at the top of the window.
+    d.addEventListener('mouseenter', () => showHandPreview(d, card))
+    d.addEventListener('mouseleave', hideHandPreview)
     handEl.appendChild(d)
   })
   if (countEl) countEl.textContent = `${me.hand?.length||0} cards`
+}
+
+// ── Floating hand-card preview (escapes clipped containers) ──
+let _handPreviewEl = null
+function showHandPreview(sourceEl, card) {
+  hideHandPreview()
+  const rect = sourceEl.getBoundingClientRect()
+  const preview = div('hcard-float')
+  if (card.image_uri) {
+    preview.innerHTML = `<img src="${card.image_uri}" draggable="false" />`
+  } else {
+    preview.innerHTML = `<div class="card-face"><div class="cf-name">${esc(card.name)}</div><div class="cf-type">${esc(card.type_line||'')}</div><div class="cf-cost">${esc(card.mana_cost||'')}</div></div>`
+  }
+  // Size: bigger than the in-hand card, capped so it always fits on screen
+  const w = Math.min(220, Math.max(rect.width * 2.1, 140))
+  const h = w * 1.4
+  preview.style.width = w + 'px'
+  preview.style.height = h + 'px'
+  // Anchor horizontally centered on the source card, vertically above it,
+  // clamped so it never goes off-screen on any edge.
+  let left = rect.left + rect.width / 2 - w / 2
+  left = Math.max(8, Math.min(left, window.innerWidth - w - 8))
+  let top = rect.top - h - 14
+  if (top < 8) top = rect.bottom + 14  // not enough room above — show below instead
+  preview.style.left = left + 'px'
+  preview.style.top = top + 'px'
+  document.body.appendChild(preview)
+  _handPreviewEl = preview
+}
+function hideHandPreview() {
+  if (_handPreviewEl) { _handPreviewEl.remove(); _handPreviewEl = null }
 }
 
 // ── Opponents column ──
@@ -2141,16 +2190,19 @@ function buildModal() {
       const res = bg.querySelector('#ts-results')
       res.innerHTML = '<div class="empty-hint">Searching Scryfall tokens…</div>'
       try {
-        // Search Scryfall for tokens matching the query
-        const resp = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q+' t:token')}&unique=art&order=name`)
-        if (!resp.ok) { res.innerHTML='<div class="empty-hint">No token results found.</div>'; return }
-        const data = await resp.json()
+        const cards = await searchTokens(q)
         res.innerHTML = ''
-        if (!data.data?.length) { res.innerHTML='<div class="empty-hint">No tokens found.</div>'; return }
-        m.cachedResults = data.data.slice(0,40)
+        if (!cards.length) { res.innerHTML='<div class="empty-hint">No tokens found for "'+esc(q)+'".</div>'; return }
+        m.cachedResults = cards.slice(0,40)
         renderTokenResults(m.cachedResults, bg)
       } catch(err) {
-        res.innerHTML='<div class="empty-hint">Search failed — check internet connection.</div>'
+        console.error('Token search failed:', err)
+        const msg = (err?.message || '').includes('NETWORK_ERROR')
+          ? 'Network error — check your internet connection.'
+          : (err?.message || '').includes('SCRYFALL_429')
+            ? 'Scryfall rate limit hit — wait a few seconds and try again.'
+            : 'Search failed: ' + (err?.message || 'unknown error')
+        res.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
       }
     }
 
@@ -2256,13 +2308,12 @@ function buildModal() {
       const res = bg.querySelector('#conj-results')
       res.innerHTML='<div class="empty-hint">Searching…</div>'
       try {
-        const resp = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q)}&unique=cards&order=name`)
-        if (!resp.ok) { res.innerHTML='<div class="empty-hint">No results.</div>'; return }
-        const data = await resp.json()
+        const cards = await searchCards(q)
         res.innerHTML=''
-        ;(data.data||[]).slice(0,20).forEach(card => {
-          const imgUri = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal||''
-          const smallUri = card.image_uris?.small || card.card_faces?.[0]?.image_uris?.small||''
+        if (!cards.length) { res.innerHTML='<div class="empty-hint">No results for "'+esc(q)+'".</div>'; return }
+        cards.slice(0,20).forEach(card => {
+          const imgUri = card.image_uri||''
+          const smallUri = card.image_small||''
           if (!imgUri) return
           const wrap = div('zc-wrap')
           const img = document.createElement('img')
@@ -2297,7 +2348,15 @@ function buildModal() {
           res.appendChild(wrap)
         })
         if (!res.children.length) res.innerHTML='<div class="empty-hint">No results.</div>'
-      } catch { res.innerHTML='<div class="empty-hint">Search failed.</div>' }
+      } catch(err) {
+        console.error('Conjure search failed:', err)
+        const msg = (err?.message || '').includes('NETWORK_ERROR')
+          ? 'Network error — check your internet connection.'
+          : (err?.message || '').includes('SCRYFALL_429')
+            ? 'Scryfall rate limit hit — wait a few seconds and try again.'
+            : 'Search failed: ' + (err?.message || 'unknown error')
+        res.innerHTML = '<div class="empty-hint">'+esc(msg)+'</div>'
+      }
     }
     bg.querySelector('#conj-go').addEventListener('click', conjSearch)
     bg.querySelector('#conj-q').addEventListener('keydown',e=>e.key==='Enter'&&conjSearch())

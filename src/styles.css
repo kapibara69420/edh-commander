@@ -209,7 +209,7 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .hand-count{font-size:.62rem;color:var(--text4);margin-top:.15rem}
 .hcard{width:var(--hcard-w,88px);height:var(--hcard-h,123px);border-radius:5px;border:2px solid var(--border2);overflow:hidden;background:var(--bg3);cursor:grab;flex-shrink:0;transition:width .08s,height .08s,transform .12s,border-color .12s;margin-right:calc(-1 * var(--hcard-overlap,22px));position:relative}
 .hcard:last-child{margin-right:0}
-.hcard:hover{border-color:var(--gold2);transform:translateY(calc(-1 * var(--hcard-overlap,22px))) scale(1.18);z-index:20;margin-right:4px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
+.hcard:hover{border-color:var(--gold2);z-index:20;margin-right:4px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
 .hcard:active{cursor:grabbing}
 .hcard.dragging{opacity:.35}
 .hcard img{width:100%;height:100%;object-fit:cover;pointer-events:none}
@@ -439,3 +439,19 @@ input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .conj-dest{transition:all .12s}
 .conj-dest.on{background:var(--purple);border-color:var(--purple2);color:#fff}
 .conj-dest:hover{border-color:var(--purple2);color:var(--purple2)}
+
+/* ── Floating hand-card preview ──
+   Rendered directly on document.body so it's never clipped by any
+   overflow:hidden ancestor (hand wrap, bottom strip, game body, etc). */
+.hcard-float{
+  position:fixed;z-index:9999;border-radius:8px;border:2px solid var(--gold2);
+  overflow:hidden;background:var(--bg3);pointer-events:none;
+  box-shadow:0 12px 40px rgba(0,0,0,.75);
+  animation:hcardFloatIn .1s ease-out;
+}
+.hcard-float img{width:100%;height:100%;object-fit:cover;display:block}
+.hcard-float .card-face{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:10px;background:var(--bg4)}
+.hcard-float .cf-name{font-size:1rem;font-weight:700;color:var(--text);text-align:center;line-height:1.25}
+.hcard-float .cf-type{font-size:.78rem;color:var(--text3);text-align:center}
+.hcard-float .cf-cost{font-size:.82rem;color:var(--gold)}
+@keyframes hcardFloatIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
