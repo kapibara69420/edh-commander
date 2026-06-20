@@ -3,6 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Prevent browsers/CDNs from caching index.html itself. The JS/CSS
+       files it references are content-hashed by Vite (e.g. index-AbC123.js)
+       so THEY can be cached forever — but index.html must always be
+       re-fetched, otherwise visitors can get stuck pointing at an old
+       hashed bundle indefinitely after a new deploy. -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>EDH Commander Online</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔</text></svg>" />
 </head>
