@@ -81,26 +81,37 @@ function R() {
 // card detail popup. Only rebuilds the parts that show other players.
 function gentleR() {
   if (S.screen !== 'game' || !S.gs) { R(); return }
-  // Re-render only opponent column and chat — leave my battlefield/modal alone
   try {
     const gs = S.gs
-    const me = gs.players[S.playerId]
     const opponents = gs.playerOrder.filter(id=>id!==S.playerId).map(id=>gs.players[id]).filter(Boolean)
     const gameEl = document.querySelector('.game-screen')
     if (!gameEl) { R(); return }
-    // Update opponent column
-    const oppsEl = gameEl.querySelector('#g-opps')
-    if (oppsEl) renderOpponents(gameEl, opponents, gs)
-    // Update chat
+
+    // Always update opponent sidebar column
+    renderOpponents(gameEl, opponents, gs)
+
+    // If we are currently viewing an opponent's board via the tab switcher,
+    // also re-render the main battlefield/hand/zones so changes they make
+    // appear live without the user having to tab away and back.
+    if (S.viewingPlayer) {
+      const viewed = gs.players[S.viewingPlayer]
+      if (viewed) {
+        renderBf(gameEl, viewed, true)
+        renderMiniZones(gameEl, viewed, true)
+        renderHand(gameEl, viewed, true)
+      }
+    }
+
+    // Update chat log
     refreshChat()
-    // Update turn pill and phase bar (non-destructive text updates)
+
+    // Update turn pill and phase markers (non-destructive in-place updates)
     const activeId = gs.playerOrder[gs.activePlayerIdx]
     const ap = gs.players[activeId]
     const turnEl = gameEl.querySelector('.turn-pill')
     if (turnEl) turnEl.innerHTML = `Turn <b>${gs.turn}</b> · <b style="color:${ap?.color||'var(--gold2)'}">${esc(ap?.name||'?')}</b>`
     gameEl.querySelectorAll('.ph').forEach(b => b.classList.toggle('on', b.dataset.ph === gs.phase))
   } catch(e) {
-    // Fallback to full rerender if partial update fails
     R()
   }
 }
